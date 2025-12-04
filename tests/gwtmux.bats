@@ -115,8 +115,8 @@ setup() {
   # Create detached tmux session
   tmux new-session -d -s "$TEST_SESSION" -c "$TEST_TEMP_DIR" 2>/dev/null
 
-  # Source tmux.sh and set PATH in the tmux session
-  tmux send-keys -t "$TEST_SESSION" "source ${BATS_TEST_DIRNAME}/../.zprofile.d/tmux.sh" Enter
+  # Source gwtmux.sh and set PATH in the tmux session
+  tmux send-keys -t "$TEST_SESSION" "source ${BATS_TEST_DIRNAME}/../gwtmux.sh" Enter
   tmux send-keys -t "$TEST_SESSION" "export PATH=$STUB_DIR:\$PATH" Enter
   sleep 0.1
 
