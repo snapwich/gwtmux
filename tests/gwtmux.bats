@@ -1619,3 +1619,54 @@ myrepo/existing"
   # Our worktree should still exist
   assert_dir_exists "$WORKTREE_PARENT/wt-stay"
 }
+
+@test "gwtmux -d: deletes worktree when run from parent directory" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create a worktree
+  git worktree add "$WORKTREE_PARENT/wt-from-parent" -b wt-from-parent main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/wt-from-parent"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "test" >test.txt
+  git add test.txt
+  git commit -m "Test commit" >/dev/null 2>&1
+
+  # Go to the parent directory (not in any git repo)
+  cd "$WORKTREE_PARENT"
+
+  # Verify we're not in a git repo
+  run git rev-parse --git-dir
+  assert_failure
+
+  # Delete the worktree from parent directory by specifying its name
+  run gwtmux -dwB wt-from-parent
+  assert_success
+
+  # The worktree should be deleted
+  refute [ -d "$WORKTREE_PARENT/wt-from-parent" ]
+
+  # The branch should be deleted
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "wt-from-parent"
+}
+
+@test "gwtmux -d: fails in parent directory without specifying worktree name" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create a worktree
+  git worktree add "$WORKTREE_PARENT/wt-test" -b wt-test main >/dev/null 2>&1
+
+  # Go to the parent directory (not in any git repo)
+  cd "$WORKTREE_PARENT"
+
+  # Running gwtmux -d without specifying a worktree should fail
+  run gwtmux -dwB
+  assert_failure
+  assert_output --partial "not in a git repository"
+
+  # The worktree should still exist
+  assert_dir_exists "$WORKTREE_PARENT/wt-test"
+}

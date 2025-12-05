@@ -155,12 +155,28 @@ EOF
     # Find git root for all operations
     local git_common_dir
     if ! git_common_dir="$(git rev-parse --git-common-dir 2>/dev/null)"; then
-      echo >&2 "Error: not in a git repository"
-      return 1
-    fi
-    # Convert to absolute path
-    if [[ "$git_common_dir" != /* ]]; then
-      git_common_dir="$PWD/$git_common_dir"
+      # Not in a git repo - but if worktree names were provided, try to find git root from them
+      if [[ ${#worktree_names[@]} -gt 0 ]]; then
+        # Try to find git common dir from the first specified worktree
+        local first_wt_name="${worktree_names[0]}"
+        local first_dir_name="${first_wt_name//\//_}"
+        local first_wt_path="$PWD/$first_dir_name"
+        if [[ -d "$first_wt_path" ]]; then
+          git_common_dir="$(git -C "$first_wt_path" rev-parse --git-common-dir 2>/dev/null)"
+          if [[ -n "$git_common_dir" && "$git_common_dir" != /* ]]; then
+            git_common_dir="$first_wt_path/$git_common_dir"
+          fi
+        fi
+      fi
+      if [[ -z "$git_common_dir" ]]; then
+        echo >&2 "Error: not in a git repository"
+        return 1
+      fi
+    else
+      # Convert to absolute path
+      if [[ "$git_common_dir" != /* ]]; then
+        git_common_dir="$PWD/$git_common_dir"
+      fi
     fi
 
     # If no worktree names provided, use current worktree (backward compatibility)
