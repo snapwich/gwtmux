@@ -1,3 +1,5 @@
+[![Validate](https://github.com/snapwich/gwtmux/actions/workflows/test.yml/badge.svg)](https://github.com/snapwich/gwtmux/actions/workflows/test.yml)
+
 # gwtmux
 
 Git worktree + tmux integration. Create and manage git worktrees in dedicated tmux windows.
