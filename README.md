@@ -4,6 +4,20 @@
 
 Git worktree + tmux integration. Create and manage git worktrees in dedicated tmux windows.
 
+## Directory Structure Convention
+
+gwtmux expects a specific directory layout:
+
+```
+myrepo/
+├── default/     # Main/Master branch (contains .git)
+├── <feature-a>/   # worktree for feature-a branch
+├── <bugfix-b>/    # worktree for bugfix-b branch
+└── <etc>/         # all worktrees manged by gwtmux are siblings of default/
+```
+
+Branch names with slashes (e.g., `feature/foo`) are converted to underscores for directory names (`feature_foo`).
+
 ## Features
 
 - **Create worktrees**: Open branches or PRs in new tmux windows with `gwtmux <branch>`
@@ -86,19 +100,6 @@ This atomically:
 2. Renames the local branch
 3. Pushes the new branch and deletes the old remote branch (if tracking)
 4. Renames the tmux window
-
-## Directory Structure Convention
-
-gwtmux expects a specific directory layout:
-
-```
-myrepo/
-├── default/     # Main checkout (contains .git)
-├── feature-a/   # Worktree for feature-a branch
-└── bugfix-b/    # Worktree for bugfix-b branch
-```
-
-Branch names with slashes (e.g., `feature/foo`) are converted to underscores for directory names (`feature_foo`).
 
 ## License
 
