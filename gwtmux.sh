@@ -336,8 +336,11 @@ EOF
           cd "$parent_dir"
           git -C "$git_root" worktree remove "$wt_path" || {
             echo >&2 "Warning: failed to remove worktree at '$wt_path'"
-            cd "$original_dir"
           }
+          # Return to original directory if it still exists (i.e., we didn't delete our own worktree)
+          if [[ -d "$original_dir" ]]; then
+            cd "$original_dir"
+          fi
         fi
 
         # Delete local branch if requested

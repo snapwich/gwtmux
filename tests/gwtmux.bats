@@ -1576,3 +1576,46 @@ myrepo/existing"
   run git -C "$MAIN_REPO" branch
   assert_output --partial "test-branch"
 }
+
+@test "gwtmux -d: stays in current worktree when deleting a different worktree" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create two worktrees
+  git worktree add "$WORKTREE_PARENT/wt-stay" -b wt-stay main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/wt-stay"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "stay" >stay.txt
+  git add stay.txt
+  git commit -m "Stay commit" >/dev/null 2>&1
+
+  cd "$MAIN_REPO"
+  git worktree add "$WORKTREE_PARENT/wt-delete" -b wt-delete main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/wt-delete"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "delete" >delete.txt
+  git add delete.txt
+  git commit -m "Delete commit" >/dev/null 2>&1
+
+  # Go to wt-stay and delete wt-delete from there
+  cd "$WORKTREE_PARENT/wt-stay"
+
+  # Delete the OTHER worktree (not the one we're in)
+  run gwtmux -dwB wt-delete
+  assert_success
+
+  # The deleted worktree should be gone
+  refute [ -d "$WORKTREE_PARENT/wt-delete" ]
+
+  # The deleted branch should be gone
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "wt-delete"
+
+  # We should still be in our original worktree, NOT the parent directory
+  assert_equal "$PWD" "$WORKTREE_PARENT/wt-stay"
+
+  # Our worktree should still exist
+  assert_dir_exists "$WORKTREE_PARENT/wt-stay"
+}
