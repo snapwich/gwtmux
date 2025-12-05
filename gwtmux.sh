@@ -24,6 +24,65 @@ gwtmux() {
   # Check dependencies
   _gwtmux_check_deps || return 1
 
+  # Help flag
+  if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    cat <<'EOF'
+gwtmux - Git worktree + tmux integration
+
+Create git worktrees from branches or PR numbers in new tmux windows.
+Manage worktree lifecycle with cleanup and rename operations.
+
+USAGE:
+  gwtmux [<branch_or_pr>...]       Create worktree(s) and open in tmux window(s)
+  gwtmux -d [flags] [worktree...]  Clean up worktree(s), branches, and tmux windows
+  gwtmux --rename <new_name>       Rename current worktree, branch, and tmux window
+  gwtmux -h, --help                Show this help message
+
+NORMAL MODE:
+  gwtmux <branch>          Create worktree for branch, open in new tmux window
+  gwtmux <pr_number>       Create worktree for PR's branch (uses gh cli)
+  gwtmux <path>            Open existing worktree path in new tmux window
+  gwtmux branch1 branch2   Create multiple worktrees at once
+  gwtmux                   (From parent dir) Open windows for all existing worktrees
+
+  If window already exists for the branch, it will be selected instead.
+  Branch names with slashes are converted to underscores for directory names.
+
+DONE MODE (-d):
+  gwtmux -d                Delete current worktree's tmux window only
+  gwtmux -d -w             Also delete the worktree directory
+  gwtmux -d -b             Also delete local branch (safe - must be merged)
+  gwtmux -d -B             Also delete local branch (force - even if unmerged)
+  gwtmux -d -r             Also delete remote branch (requires -b or -B)
+  gwtmux -d -wbr           Combine flags: worktree + branch + remote
+  gwtmux -d -wBr name...   Delete specific worktree(s) by name
+
+  Flags can be combined: -dwbr, -dBrw, etc.
+  If current window is last in session, renames to shell name instead of killing.
+
+RENAME MODE (--rename):
+  gwtmux --rename <name>   Rename worktree dir, branch, remote branch, and window
+
+  Only works from within a worktree (not main repo).
+  Validates that latest commit is authored by you before renaming remote.
+
+EXAMPLES:
+  gwtmux feature/auth      Create worktree for feature/auth branch
+  gwtmux 123               Create worktree for PR #123
+  gwtmux -dwbr             Clean up current worktree completely
+  gwtmux -dw feat1 feat2   Delete worktrees for feat1 and feat2
+  gwtmux --rename new-name Rename current branch to new-name
+
+REQUIREMENTS:
+  - git, tmux (required)
+  - gh (optional, for PR number support)
+  - Must be run inside tmux session
+
+For more info: https://github.com/snapwich/gwtmux
+EOF
+    return 0
+  fi
+
   # Detect mode based on flags
   local mode="normal"
   if [[ "$1" == "--rename" ]]; then
