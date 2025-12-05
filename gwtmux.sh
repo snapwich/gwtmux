@@ -201,8 +201,7 @@ EOF
       # Pre-flight checks: validate branch deletion before making any destructive changes
       if [[ -n "$branch" && $delete_local -eq 1 ]]; then
         # Safe delete - check if merged BEFORE removing worktree
-        local default_branch
-        default_branch="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+        local default_branch="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
         if [[ -z "$default_branch" ]]; then
           if git show-ref --verify --quiet refs/remotes/origin/main; then
             default_branch="main"
@@ -277,8 +276,7 @@ EOF
       local -a window_names=()
 
       # Determine default branch for merge checking
-      local default_branch
-      default_branch="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+      local default_branch="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
       if [[ -z "$default_branch" ]]; then
         if git show-ref --verify --quiet refs/remotes/origin/main; then
           default_branch="main"
@@ -304,8 +302,7 @@ EOF
         fi
 
         # Get branch name for this worktree
-        local wt_branch
-        wt_branch="$(git -C "$wt_path" branch --show-current 2>/dev/null)"
+        local wt_branch="$(git -C "$wt_path" branch --show-current 2>/dev/null)"
 
         # Check if we're trying to delete main repo
         if [[ $delete_worktree -eq 1 || $delete_local -gt 0 ]]; then
@@ -398,16 +395,14 @@ EOF
             deferred_kill_window="$window_name"
           else
             # Get the actual session name using tmux
-            local tmux_session
-            tmux_session="$(tmux display-message -p '#S')"
+            local tmux_session="$(tmux display-message -p '#S')"
 
             # Get window index by exact name match
-            local window_index
-            window_index=$(tmux list-windows -t "$tmux_session" -F "#{window_index} #W" 2>/dev/null |
+            local window_index="$(tmux list-windows -t "$tmux_session" -F "#{window_index} #W" 2>/dev/null |
               awk -v name="$window_name" '{
                   win_name = substr($0, index($0, " ") + 1);
                   if (win_name == name) {print $1; exit}
-                }')
+                }')"
 
             if [[ -n "$window_index" ]]; then
               tmux kill-window -t "$tmux_session:$window_index" 2>/dev/null || true
@@ -420,9 +415,8 @@ EOF
 
       # Kill the current window last (if it was one of the worktrees we deleted)
       if [[ -n "$deferred_kill_window" && -n "$TMUX" ]]; then
-        local tmux_session
-        tmux_session="$(tmux display-message -p '#S')"
-        local window_count=$(tmux list-windows -t "$tmux_session" | wc -l)
+        local tmux_session="$(tmux display-message -p '#S')"
+        local window_count="$(tmux list-windows -t "$tmux_session" | wc -l)"
         if [[ $window_count -eq 1 ]]; then
           # Last window: navigate to parent and rename to shell name
           local shell_name=$(basename "${SHELL:-zsh}")
