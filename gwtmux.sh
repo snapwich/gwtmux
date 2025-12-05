@@ -278,11 +278,11 @@ EOF
       local -a window_names=()
 
       # Determine default branch for merge checking
-      local default_branch="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+      local default_branch="$(git -C "$git_root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
       if [[ -z "$default_branch" ]]; then
-        if git show-ref --verify --quiet refs/remotes/origin/main; then
+        if git -C "$git_root" show-ref --verify --quiet refs/remotes/origin/main; then
           default_branch="main"
-        elif git show-ref --verify --quiet refs/remotes/origin/master; then
+        elif git -C "$git_root" show-ref --verify --quiet refs/remotes/origin/master; then
           default_branch="master"
         else
           default_branch="main" # ultimate fallback
