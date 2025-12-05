@@ -135,13 +135,21 @@ setup() {
   STUB_DIR="$TEST_TEMP_DIR/stubs"
   mkdir -p "$STUB_DIR"
 
-  # Create detached tmux session
-  tmux new-session -d -s "$TEST_SESSION" -c "$TEST_TEMP_DIR" 2>/dev/null
+  # Create a temporary bashrc that sources gwtmux - this ensures gwtmux is available
+  # in all new tmux windows, not just the first one
+  TEST_BASHRC="$TEST_TEMP_DIR/test_bashrc"
+  cat > "$TEST_BASHRC" <<EOF
+source "${BATS_TEST_DIRNAME}/../gwtmux.sh"
+export PATH="$STUB_DIR:\$PATH"
+EOF
 
-  # Source gwtmux.sh and set PATH in the tmux session
-  tmux send-keys -t "$TEST_SESSION" "source ${BATS_TEST_DIRNAME}/../gwtmux.sh" Enter
-  tmux send-keys -t "$TEST_SESSION" "export PATH=$STUB_DIR:\$PATH" Enter
-  sleep 0.1
+  # Create detached tmux session with our custom shell init
+  # Use bash -i to ensure it's interactive and reads our rc file
+  tmux new-session -d -s "$TEST_SESSION" -c "$TEST_TEMP_DIR" "bash --rcfile '$TEST_BASHRC' -i" 2>/dev/null
+  sleep 0.1  # Wait for shell to start
+
+  # Configure new windows to also use our bashrc
+  tmux set-option -t "$TEST_SESSION" default-command "bash --rcfile '$TEST_BASHRC' -i"
 
   # Set TMUX variable so functions think we're in tmux (for direct calls in test process)
   export TMUX="/tmp/tmux-$(id -u)/default,$TEST_SESSION,0"
