@@ -13,44 +13,27 @@ source "${BATS_TEST_DIRNAME}/../gwtmux.sh"
 # HELPER FUNCTIONS
 # ============================================================================
 
-# Wait for a directory to be deleted (with timeout)
-# Usage: wait_for_dir_deleted "/path/to/dir" [timeout_seconds]
-wait_for_dir_deleted() {
-  local dir="$1"
-  local timeout="${2:-5}"
+# Global timeout for condition waits (in 0.1s increments)
+# Default: 100 iterations = 10 seconds. Override via environment for CI.
+WAIT_TIMEOUT="${GWTMUX_TEST_TIMEOUT:-100}"
+
+# Generic wait helper - polls until condition succeeds or timeout
+# Usage: wait_until "condition command"
+# Returns: 0 if condition succeeded, 1 if timed out
+wait_until() {
+  local condition="$1"
   local elapsed=0
-  while [ -d "$dir" ] && [ "$elapsed" -lt "$timeout" ]; do
+  while ! eval "$condition" && [ "$elapsed" -lt "$WAIT_TIMEOUT" ]; do
     sleep 0.1
     elapsed=$((elapsed + 1))
   done
-  [ ! -d "$dir" ]
+  eval "$condition"
 }
 
-# Wait for a directory to exist (with timeout)
-# Usage: wait_for_dir_exists "/path/to/dir" [timeout_seconds]
-wait_for_dir_exists() {
-  local dir="$1"
-  local timeout="${2:-5}"
-  local elapsed=0
-  while [ ! -d "$dir" ] && [ "$elapsed" -lt "$timeout" ]; do
-    sleep 0.1
-    elapsed=$((elapsed + 1))
-  done
-  [ -d "$dir" ]
-}
-
-# Wait for a tmux window to NOT exist (with timeout)
-# Usage: wait_for_window_closed "window_name" [timeout_iterations]
-wait_for_window_closed() {
-  local window_name="$1"
-  local timeout="${2:-50}"
-  local elapsed=0
-  while get_tmux_windows | grep -Fxq "$window_name" && [ "$elapsed" -lt "$timeout" ]; do
-    sleep 0.1
-    elapsed=$((elapsed + 1))
-  done
-  ! get_tmux_windows | grep -Fxq "$window_name"
-}
+# Convenience wrappers for common conditions
+wait_for_dir_deleted() { wait_until "[ ! -d '$1' ]"; }
+wait_for_dir_exists() { wait_until "[ -d '$1' ]"; }
+wait_for_window_closed() { wait_until "! get_tmux_windows | grep -Fxq '$1'"; }
 
 # Setup a basic git repository with a bare remote
 setup_git_repos() {
@@ -1474,8 +1457,8 @@ myrepo/existing"
   tmux send-keys -t "$window_id" "cd $MAIN_REPO && gwtmux -d wt-a wt-b" Enter
 
   # Windows should be closed (wait for async command)
-  wait_for_window_closed "myrepo/wt-a" 50
-  wait_for_window_closed "myrepo/wt-b" 50
+  wait_for_window_closed "myrepo/wt-a"
+  wait_for_window_closed "myrepo/wt-b"
   run get_tmux_windows
   refute_output --partial "myrepo/wt-a"
   refute_output --partial "myrepo/wt-b"
@@ -1549,7 +1532,7 @@ myrepo/existing"
   tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -dwb" Enter
 
   # Should delete current worktree (wait for async tmux command)
-  wait_for_dir_deleted "$WORKTREE_PARENT/test-wt" 50
+  wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
   run git -C "$MAIN_REPO" branch
   refute_output --partial "test-branch"
