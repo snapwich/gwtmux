@@ -158,7 +158,9 @@ EOF
       # Not in a git repo - but if worktree names were provided, try to find git root from them
       if [[ ${#worktree_names[@]} -gt 0 ]]; then
         # Try to find git common dir from the first specified worktree
-        local first_wt_name="${worktree_names[0]}"
+        # Use array index that works in both bash (0-indexed) and zsh (1-indexed)
+        local first_wt_name="${worktree_names[*]:0:1}"
+        [[ -z "$first_wt_name" ]] && first_wt_name="${worktree_names[1]}"
         local first_dir_name="${first_wt_name//\//_}"
         local first_wt_path="$PWD/$first_dir_name"
         if [[ -d "$first_wt_path" ]]; then

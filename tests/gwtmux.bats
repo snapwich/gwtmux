@@ -1652,6 +1652,60 @@ myrepo/existing"
   refute_output --partial "wt-from-parent"
 }
 
+@test "gwtmux -d: deletes multiple worktrees when run from parent directory" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create multiple worktrees
+  git worktree add "$WORKTREE_PARENT/wt-p1" -b wt-p1 main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/wt-p1"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "1" >file1.txt
+  git add file1.txt
+  git commit -m "Commit 1" >/dev/null 2>&1
+
+  cd "$MAIN_REPO"
+  git worktree add "$WORKTREE_PARENT/wt-p2" -b wt-p2 main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/wt-p2"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "2" >file2.txt
+  git add file2.txt
+  git commit -m "Commit 2" >/dev/null 2>&1
+
+  cd "$MAIN_REPO"
+  git worktree add "$WORKTREE_PARENT/wt-p3" -b wt-p3 main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/wt-p3"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "3" >file3.txt
+  git add file3.txt
+  git commit -m "Commit 3" >/dev/null 2>&1
+
+  # Go to the parent directory (not in any git repo)
+  cd "$WORKTREE_PARENT"
+
+  # Verify we're not in a git repo
+  run git rev-parse --git-dir
+  assert_failure
+
+  # Delete all three worktrees from parent directory
+  run gwtmux -dwB wt-p1 wt-p2 wt-p3
+  assert_success
+
+  # All worktrees should be deleted
+  refute [ -d "$WORKTREE_PARENT/wt-p1" ]
+  refute [ -d "$WORKTREE_PARENT/wt-p2" ]
+  refute [ -d "$WORKTREE_PARENT/wt-p3" ]
+
+  # All branches should be deleted
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "wt-p1"
+  refute_output --partial "wt-p2"
+  refute_output --partial "wt-p3"
+}
+
 @test "gwtmux -d: fails in parent directory without specifying worktree name" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
