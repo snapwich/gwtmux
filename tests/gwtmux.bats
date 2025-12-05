@@ -13,6 +13,45 @@ source "${BATS_TEST_DIRNAME}/../gwtmux.sh"
 # HELPER FUNCTIONS
 # ============================================================================
 
+# Wait for a directory to be deleted (with timeout)
+# Usage: wait_for_dir_deleted "/path/to/dir" [timeout_seconds]
+wait_for_dir_deleted() {
+  local dir="$1"
+  local timeout="${2:-5}"
+  local elapsed=0
+  while [ -d "$dir" ] && [ "$elapsed" -lt "$timeout" ]; do
+    sleep 0.1
+    elapsed=$((elapsed + 1))
+  done
+  [ ! -d "$dir" ]
+}
+
+# Wait for a directory to exist (with timeout)
+# Usage: wait_for_dir_exists "/path/to/dir" [timeout_seconds]
+wait_for_dir_exists() {
+  local dir="$1"
+  local timeout="${2:-5}"
+  local elapsed=0
+  while [ ! -d "$dir" ] && [ "$elapsed" -lt "$timeout" ]; do
+    sleep 0.1
+    elapsed=$((elapsed + 1))
+  done
+  [ -d "$dir" ]
+}
+
+# Wait for a tmux window to NOT exist (with timeout)
+# Usage: wait_for_window_closed "window_name" [timeout_iterations]
+wait_for_window_closed() {
+  local window_name="$1"
+  local timeout="${2:-50}"
+  local elapsed=0
+  while get_tmux_windows | grep -Fxq "$window_name" && [ "$elapsed" -lt "$timeout" ]; do
+    sleep 0.1
+    elapsed=$((elapsed + 1))
+  done
+  ! get_tmux_windows | grep -Fxq "$window_name"
+}
+
 # Setup a basic git repository with a bare remote
 setup_git_repos() {
   # Create bare "remote" repository
@@ -291,7 +330,7 @@ myrepo/existing"
   git init "$OTHER_REPO_PARENT/default" >/dev/null 2>&1
   git -C "$OTHER_REPO_PARENT/default" config user.name "Test"
   git -C "$OTHER_REPO_PARENT/default" config user.email "test@test.com"
-  echo "test" > "$OTHER_REPO_PARENT/default/file.txt"
+  echo "test" >"$OTHER_REPO_PARENT/default/file.txt"
   git -C "$OTHER_REPO_PARENT/default" add .
   git -C "$OTHER_REPO_PARENT/default" commit -m "init" >/dev/null 2>&1
 
@@ -316,7 +355,7 @@ myrepo/existing"
   git init "$OTHER_REPO_PARENT/default" >/dev/null 2>&1
   git -C "$OTHER_REPO_PARENT/default" config user.name "Test"
   git -C "$OTHER_REPO_PARENT/default" config user.email "test@test.com"
-  echo "test" > "$OTHER_REPO_PARENT/default/file.txt"
+  echo "test" >"$OTHER_REPO_PARENT/default/file.txt"
   git -C "$OTHER_REPO_PARENT/default" add .
   git -C "$OTHER_REPO_PARENT/default" commit -m "init" >/dev/null 2>&1
 
@@ -382,17 +421,19 @@ myrepo/existing"
 }
 
 # ----------------------------------------------------------------------------
-# Zsh window reuse logic
+# Shell window reuse logic
 # ----------------------------------------------------------------------------
 
-@test "gwtmux: reuses single-pane zsh window" {
+@test "gwtmux: reuses single-pane shell window" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
-  # Rename the initial window to "zsh" with single pane
-  # Use the actual first window ID instead of assuming :0
+  # Use the actual shell name that gwtmux expects
+  local shell_name=$(basename "${SHELL:-zsh}")
+
+  # Rename the initial window to shell name with single pane
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
-  tmux rename-window -t "$first_window" "zsh"
+  tmux rename-window -t "$first_window" "$shell_name"
 
   local initial_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
 
@@ -406,16 +447,18 @@ myrepo/existing"
   # Window should now be named after the worktree
   run get_tmux_windows
   assert_output --partial "myrepo/new-branch"
-  refute_output --partial "zsh"
+  refute_output --partial "$shell_name"
 }
 
-@test "gwtmux: creates new window if zsh has multiple panes" {
+@test "gwtmux: creates new window if shell window has multiple panes" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
-  # Rename window to "zsh" and split it
+  local shell_name=$(basename "${SHELL:-zsh}")
+
+  # Rename window to shell name and split it
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
-  tmux rename-window -t "$first_window" "zsh"
+  tmux rename-window -t "$first_window" "$shell_name"
   tmux split-window -t "$first_window"
 
   local initial_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
@@ -431,11 +474,11 @@ myrepo/existing"
 
   # Both windows should exist
   run get_tmux_windows
-  assert_output --partial "zsh"
+  assert_output --partial "$shell_name"
   assert_output --partial "myrepo/new-branch"
 }
 
-@test "gwtmux: creates new window if current window is not named zsh" {
+@test "gwtmux: creates new window if current window is not named after shell" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
@@ -526,13 +569,15 @@ myrepo/existing"
   assert_dir_exists "$WORKTREE_PARENT/new-one"
 }
 
-@test "gwtmux: reuses zsh window for first success, creates new for rest" {
+@test "gwtmux: reuses shell window for first success, creates new for rest" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
-  # Rename window to zsh
+  local shell_name=$(basename "${SHELL:-zsh}")
+
+  # Rename window to shell name
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
-  tmux rename-window -t "$first_window" "zsh"
+  tmux rename-window -t "$first_window" "$shell_name"
 
   local initial_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
 
@@ -543,9 +588,9 @@ myrepo/existing"
   local final_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
   assert_equal "$((initial_window_count + 1))" "$final_window_count"
 
-  # Should not have zsh window anymore
+  # Should not have shell window anymore
   run get_tmux_windows
-  refute_output --partial "zsh"
+  refute_output --partial "$shell_name"
 
   # Should have both feature windows
   assert_output --partial "myrepo/feat-a"
@@ -1212,7 +1257,6 @@ myrepo/existing"
   assert_output --partial "unknown option"
 }
 
-
 # ----------------------------------------------------------------------------
 # New window handling functionality
 # ----------------------------------------------------------------------------
@@ -1428,9 +1472,10 @@ myrepo/existing"
 
   # Execute via tmux send-keys so gwtmux has proper tmux context
   tmux send-keys -t "$window_id" "cd $MAIN_REPO && gwtmux -d wt-a wt-b" Enter
-  sleep 0.5
 
-  # Windows should be closed
+  # Windows should be closed (wait for async command)
+  wait_for_window_closed "myrepo/wt-a" 50
+  wait_for_window_closed "myrepo/wt-b" 50
   run get_tmux_windows
   refute_output --partial "myrepo/wt-a"
   refute_output --partial "myrepo/wt-b"
@@ -1498,12 +1543,13 @@ myrepo/existing"
 
   cd "$WORKTREE_PARENT/test-wt"
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
+  sleep 0.1  # Wait for shell to be ready
 
   # Run without arguments (original behavior)
   tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -dwb" Enter
-  sleep 0.5
 
-  # Should delete current worktree
+  # Should delete current worktree (wait for async tmux command)
+  wait_for_dir_deleted "$WORKTREE_PARENT/test-wt" 50
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
   run git -C "$MAIN_REPO" branch
   refute_output --partial "test-branch"
