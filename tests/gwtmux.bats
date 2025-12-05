@@ -1670,3 +1670,69 @@ myrepo/existing"
   # The worktree should still exist
   assert_dir_exists "$WORKTREE_PARENT/wt-test"
 }
+
+@test "gwtmux -d: deletes multiple worktrees including current one" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create three worktrees
+  git worktree add "$WORKTREE_PARENT/wt-1" -b wt-1 main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/wt-1"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "1" >file1.txt
+  git add file1.txt
+  git commit -m "Commit 1" >/dev/null 2>&1
+
+  cd "$MAIN_REPO"
+  git worktree add "$WORKTREE_PARENT/wt-2" -b wt-2 main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/wt-2"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "2" >file2.txt
+  git add file2.txt
+  git commit -m "Commit 2" >/dev/null 2>&1
+
+  cd "$MAIN_REPO"
+  git worktree add "$WORKTREE_PARENT/wt-3" -b wt-3 main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/wt-3"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "3" >file3.txt
+  git add file3.txt
+  git commit -m "Commit 3" >/dev/null 2>&1
+
+  # Create tmux windows for all three
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/wt-1" -c "$WORKTREE_PARENT/wt-1" 2>/dev/null
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/wt-2" -c "$WORKTREE_PARENT/wt-2" 2>/dev/null
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/wt-3" -c "$WORKTREE_PARENT/wt-3" 2>/dev/null
+
+  # Get window ID for wt-3 (we'll run the command from there)
+  local wt3_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id} #W" |
+    awk '/myrepo\/wt-3/ {print $1}')
+
+  # From wt-3, delete wt-2 and wt-3 (current worktree is included)
+  # Use a temp file to capture if the command completed
+  local marker_file="/tmp/gwtmux_multi_delete_$$"
+  tmux send-keys -t "$wt3_window" "cd $WORKTREE_PARENT/wt-3 && gwtmux -dwB wt-2 wt-3 && echo done > $marker_file" Enter
+
+  # Wait for both worktrees to be deleted
+  wait_for_dir_deleted "$WORKTREE_PARENT/wt-2"
+  wait_for_dir_deleted "$WORKTREE_PARENT/wt-3"
+
+  # Both worktrees should be deleted
+  refute [ -d "$WORKTREE_PARENT/wt-2" ]
+  refute [ -d "$WORKTREE_PARENT/wt-3" ]
+
+  # Both branches should be deleted
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "wt-2"
+  refute_output --partial "wt-3"
+
+  # wt-1 should still exist
+  assert_dir_exists "$WORKTREE_PARENT/wt-1"
+  run git -C "$MAIN_REPO" branch
+  assert_output --partial "wt-1"
+
+  rm -f "$marker_file"
+}

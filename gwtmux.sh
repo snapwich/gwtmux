@@ -339,6 +339,14 @@ EOF
       local start_idx=0
       [[ -n "${ZSH_VERSION:-}" ]] && start_idx=1
 
+      # Get current window name to defer killing it until the end
+      # (killing the current window terminates the shell running this script)
+      local current_window_name=""
+      local deferred_kill_window=""
+      if [[ -n "$TMUX" ]]; then
+        current_window_name="$(tmux display-message -p '#W')"
+      fi
+
       local idx=$start_idx
       local end_idx=$((start_idx + ${#worktree_paths[@]}))
       while [[ $idx -lt $end_idx ]]; do
@@ -383,30 +391,47 @@ EOF
           fi
         fi
 
-        # Close tmux window for this worktree
+        # Close tmux window for this worktree (defer if it's the current window)
         if [[ -n "$TMUX" ]]; then
-          # Get the actual session name using tmux
-          local tmux_session
-          tmux_session="$(tmux display-message -p '#S')"
+          if [[ "$window_name" == "$current_window_name" ]]; then
+            # Defer killing the current window until all other deletions are complete
+            deferred_kill_window="$window_name"
+          else
+            # Get the actual session name using tmux
+            local tmux_session
+            tmux_session="$(tmux display-message -p '#S')"
 
-          # Get window index by exact name match
-          local window_index
-          window_index=$(tmux list-windows -t "$tmux_session" -F "#{window_index} #W" 2>/dev/null |
-            awk -v name="$window_name" '{
-                win_name = substr($0, index($0, " ") + 1);
-                if (win_name == name) {print $1; exit}
-              }')
+            # Get window index by exact name match
+            local window_index
+            window_index=$(tmux list-windows -t "$tmux_session" -F "#{window_index} #W" 2>/dev/null |
+              awk -v name="$window_name" '{
+                  win_name = substr($0, index($0, " ") + 1);
+                  if (win_name == name) {print $1; exit}
+                }')
 
-          if [[ -n "$window_index" ]]; then
-            tmux kill-window -t "$tmux_session:$window_index" 2>/dev/null || true
+            if [[ -n "$window_index" ]]; then
+              tmux kill-window -t "$tmux_session:$window_index" 2>/dev/null || true
+            fi
           fi
         fi
 
         idx=$((idx + 1))
       done
 
-      # Note: No smart window handling for multi-worktree mode.
-      # When deleting specific worktrees by name, the user stays in their current window.
+      # Kill the current window last (if it was one of the worktrees we deleted)
+      if [[ -n "$deferred_kill_window" && -n "$TMUX" ]]; then
+        local tmux_session
+        tmux_session="$(tmux display-message -p '#S')"
+        local window_count=$(tmux list-windows -t "$tmux_session" | wc -l)
+        if [[ $window_count -eq 1 ]]; then
+          # Last window: navigate to parent and rename to shell name
+          local shell_name=$(basename "${SHELL:-zsh}")
+          tmux rename-window "$shell_name"
+        else
+          # Not last window: kill as usual
+          tmux kill-window
+        fi
+      fi
     fi
     ;;
 
