@@ -577,8 +577,10 @@ EOF
       return 0
     fi
 
-    # Find git root once for all arguments
+    # Try to find git root for arguments that need it (branch names, PR numbers)
+    # Path arguments don't need git_root, so don't fail here.
     local git_common_dir git_root
+    local has_git_root=0
     if $git_cmd rev-parse --git-dir &>/dev/null; then
       git_common_dir="$($git_cmd rev-parse --git-common-dir)"
       if [[ "$git_common_dir" == .git ]]; then
@@ -588,29 +590,33 @@ EOF
       else
         git_root="$PWD/$(dirname -- "$git_common_dir")"
       fi
+      has_git_root=1
     elif [[ -d "default/.git" ]]; then
       git_root="$PWD/default"
-    else
-      echo >&2 "Error: not in a git repo or parent of default/.git"
-      return 1
+      has_git_root=1
     fi
 
-    # Fetch once before processing all arguments
-    $git_cmd -C "$git_root" fetch -a
+    # Fetch once before processing all arguments (only if we have a git root)
+    if [[ $has_git_root -eq 1 ]]; then
+      $git_cmd -C "$git_root" fetch -a
+    fi
 
-    local repo_name="$(basename "$(dirname -- "$git_root")")"
-    local default_branch
-    default_branch="$(
-      $git_cmd -C "$git_root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null |
-        sed 's|^origin/||'
-    )"
-    if [[ -z "$default_branch" ]]; then
-      if $git_cmd -C "$git_root" show-ref --verify --quiet refs/remotes/origin/main; then
-        default_branch="main"
-      elif $git_cmd -C "$git_root" show-ref --verify --quiet refs/remotes/origin/master; then
-        default_branch="master"
-      else
-        default_branch="main" # ultimate fallback
+    local repo_name=""
+    local default_branch=""
+    if [[ $has_git_root -eq 1 ]]; then
+      repo_name="$(basename "$(dirname -- "$git_root")")"
+      default_branch="$(
+        $git_cmd -C "$git_root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null |
+          sed 's|^origin/||'
+      )"
+      if [[ -z "$default_branch" ]]; then
+        if $git_cmd -C "$git_root" show-ref --verify --quiet refs/remotes/origin/main; then
+          default_branch="main"
+        elif $git_cmd -C "$git_root" show-ref --verify --quiet refs/remotes/origin/master; then
+          default_branch="master"
+        else
+          default_branch="main" # ultimate fallback
+        fi
       fi
     fi
 
@@ -660,6 +666,10 @@ EOF
 
       # If not a path, resolve branch name (try gh pr first, fall back to arg)
       if [[ $path_matched -eq 0 ]]; then
+        if [[ $has_git_root -eq 0 ]]; then
+          echo >&2 "Error: not in a git repo or parent of default/.git"
+          return 1
+        fi
         branch="$(
           (cd "$git_root" 2>/dev/null && GH_PAGER= gh pr view "$arg" --json headRefName --jq '.headRefName') 2>/dev/null
         )"

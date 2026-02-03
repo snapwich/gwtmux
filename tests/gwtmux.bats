@@ -362,6 +362,61 @@ myrepo/existing"
 }
 
 # ----------------------------------------------------------------------------
+# Path arguments from outside any git repo
+# ----------------------------------------------------------------------------
+
+@test "gwtmux: opens existing worktree via absolute path from outside any git repo" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create a worktree
+  git worktree add -b feature-wt "$WORKTREE_PARENT/feature-wt" main >/dev/null 2>&1
+
+  # Create a non-git directory to run from
+  local OUTSIDE_DIR="$TEST_TEMP_DIR/not-a-repo"
+  mkdir -p "$OUTSIDE_DIR"
+
+  # Open worktree via absolute path from outside any git repo
+  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux $WORKTREE_PARENT/feature-wt" Enter
+  wait_for_window_exists "myrepo/feature-wt"
+
+  # Window should exist with correct repo/branch name
+  run get_tmux_windows
+  assert_output --partial "myrepo/feature-wt"
+}
+
+@test "gwtmux: opens existing worktree via relative path from outside any git repo" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create a worktree
+  git worktree add -b feature-wt "$WORKTREE_PARENT/feature-wt" main >/dev/null 2>&1
+
+  # Create a non-git directory to run from
+  local OUTSIDE_DIR="$TEST_TEMP_DIR/not-a-repo"
+  mkdir -p "$OUTSIDE_DIR"
+
+  # Open worktree via relative path from outside any git repo
+  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/feature-wt" Enter
+  wait_for_window_exists "myrepo/feature-wt"
+
+  # Window should exist with correct repo/branch name
+  run get_tmux_windows
+  assert_output --partial "myrepo/feature-wt"
+}
+
+@test "gwtmux: errors with branch arg from outside any git repo" {
+  # Create a non-git directory
+  local OUTSIDE_DIR="$TEST_TEMP_DIR/not-a-repo"
+  mkdir -p "$OUTSIDE_DIR"
+  cd "$OUTSIDE_DIR"
+
+  run gwtmux some-branch
+  assert_failure
+  assert_output --partial "not in a git repo or parent of default/.git"
+}
+
+# ----------------------------------------------------------------------------
 # Multi-worktree mode (no arguments)
 # ----------------------------------------------------------------------------
 
