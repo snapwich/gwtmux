@@ -36,6 +36,13 @@ wait_for_dir_exists() { wait_until "[ -d '$1' ]"; }
 wait_for_window_exists() { wait_until "get_tmux_windows | grep -Fxq '$1'"; }
 wait_for_window_closed() { wait_until "! get_tmux_windows | grep -Fxq '$1'"; }
 
+# Confirm new branch creation prompt (sends "y" when prompt appears)
+confirm_branch_creation() {
+  local target="${1:-$TEST_SESSION}"
+  wait_until "tmux capture-pane -t '$target' -p | grep -q 'Create new branch'"
+  tmux send-keys -t "$target" "y" Enter
+}
+
 # Setup a basic git repository with a bare remote
 setup_git_repos() {
   # Create bare "remote" repository
@@ -181,6 +188,7 @@ teardown() {
   cd "$MAIN_REPO"
 
   tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux new-feature 2>&1; echo EXIT_CODE:\$?" Enter
+  confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/new-feature"
 
   # Check what happened in tmux
@@ -240,6 +248,7 @@ teardown() {
   stub_gh_pr "123" "pr-123-feature"
 
   tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux 123" Enter
+  confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/pr-123-feature"
 
   assert_dir_exists "$WORKTREE_PARENT/pr-123-feature"
@@ -254,6 +263,7 @@ teardown() {
   stub_gh_fail
 
   tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux not-a-pr" Enter
+  confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/not-a-pr"
 
   # Should create worktree with "not-a-pr" as branch name
@@ -456,6 +466,7 @@ myrepo/existing"
   cd "$MAIN_REPO"
 
   tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux feature/with/slashes" Enter
+  confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/feature_with_slashes"
 
   # Directory should use underscores
@@ -485,6 +496,7 @@ myrepo/existing"
   local initial_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
 
   tmux send-keys -t "$first_window" "cd $MAIN_REPO && gwtmux new-branch" Enter
+  confirm_branch_creation "$first_window"
   wait_for_dir_exists "$WORKTREE_PARENT/new-branch"
 
   # Window should have been renamed (not created new)
@@ -513,6 +525,7 @@ myrepo/existing"
   # Get the first pane of the window
   local first_pane=$(tmux list-panes -t "$first_window" -F "#{pane_id}" | head -1)
   tmux send-keys -t "$first_pane" "cd $MAIN_REPO && gwtmux new-branch" Enter
+  confirm_branch_creation "$first_pane"
   wait_for_dir_exists "$WORKTREE_PARENT/new-branch"
 
   # Should have created a new window (not reused)
@@ -536,6 +549,7 @@ myrepo/existing"
   local initial_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
 
   tmux send-keys -t "$first_window" "cd $MAIN_REPO && gwtmux new-branch" Enter
+  confirm_branch_creation "$first_window"
   wait_for_dir_exists "$WORKTREE_PARENT/new-branch"
 
   # Should have created a new window
@@ -551,7 +565,11 @@ myrepo/existing"
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux feature-1 feature-2 feature-3" Enter
+  local initial_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux send-keys -t "$initial_window" "cd $MAIN_REPO && gwtmux feature-1 feature-2 feature-3" Enter
+  confirm_branch_creation "$initial_window"
+  confirm_branch_creation "$initial_window"
+  confirm_branch_creation "$initial_window"
   wait_for_dir_exists "$WORKTREE_PARENT/feature-3"
 
   # All worktrees should be created
@@ -573,7 +591,11 @@ myrepo/existing"
   # Create a file where one worktree would be created (will cause failure)
   touch "$WORKTREE_PARENT/conflict"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux good-1 conflict good-2" Enter
+  local initial_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux send-keys -t "$initial_window" "cd $MAIN_REPO && gwtmux good-1 conflict good-2" Enter
+  confirm_branch_creation "$initial_window"
+  confirm_branch_creation "$initial_window"
+  confirm_branch_creation "$initial_window"
   wait_for_dir_exists "$WORKTREE_PARENT/good-2"
 
   # Should create the valid worktrees
@@ -606,6 +628,7 @@ myrepo/existing"
   # Try to create both plus a new one
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
   tmux send-keys -t "$first_window" "cd $MAIN_REPO && gwtmux existing-1 existing-2 new-one" Enter
+  confirm_branch_creation "$first_window"
   wait_for_dir_exists "$WORKTREE_PARENT/new-one"
 
   # Should have one more window (new-one), not duplicates
@@ -629,6 +652,8 @@ myrepo/existing"
   local initial_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
 
   tmux send-keys -t "$first_window" "cd $MAIN_REPO && gwtmux feat-a feat-b" Enter
+  confirm_branch_creation "$first_window"
+  confirm_branch_creation "$first_window"
   wait_for_dir_exists "$WORKTREE_PARENT/feat-b"
 
   # Should have 2 windows total (reused one, created one new)
@@ -658,6 +683,7 @@ myrepo/existing"
 
   # Create new branch (should be based on main)
   tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux test-branch" Enter
+  confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/test-branch"
 
   # Verify the branch was created
@@ -673,6 +699,7 @@ myrepo/existing"
 
   # Create new branch (should still find main)
   tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux test-branch" Enter
+  confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/test-branch"
 
   assert_dir_exists "$WORKTREE_PARENT/test-branch"
@@ -704,6 +731,7 @@ myrepo/existing"
   git remote set-head origin -d >/dev/null 2>&1
 
   tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux test-branch" Enter
+  confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/test-branch"
 
   assert_dir_exists "$WORKTREE_PARENT/test-branch"
@@ -740,11 +768,147 @@ myrepo/existing"
   touch "$WORKTREE_PARENT/conflict"
 
   tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux conflict" Enter
+  confirm_branch_creation "$TEST_SESSION"
   wait_until "tmux capture-pane -t '$TEST_SESSION' -p | grep -q 'failed to create worktree'"
 
   # Should see error about failed worktree creation
   run tmux capture-pane -t "$TEST_SESSION" -p
   assert_output --partial "failed to create worktree"
+}
+
+# ----------------------------------------------------------------------------
+# Confirmation prompt
+# ----------------------------------------------------------------------------
+
+@test "gwtmux: skips branch creation when user declines confirmation" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux declined-branch" Enter
+  wait_until "tmux capture-pane -t '$TEST_SESSION' -p | grep -q 'Create new branch'"
+  tmux send-keys -t "$TEST_SESSION" "n" Enter
+  wait_until "tmux capture-pane -t '$TEST_SESSION' -p | grep -q 'Skipping'"
+
+  # Worktree should NOT be created
+  refute [ -d "$WORKTREE_PARENT/declined-branch" ]
+
+  # Should see skip message
+  run tmux capture-pane -t "$TEST_SESSION" -p
+  assert_output --partial "Skipping 'declined-branch'"
+}
+
+# ----------------------------------------------------------------------------
+# Path-based branch creation (repo-parent paths)
+# ----------------------------------------------------------------------------
+
+@test "gwtmux: creates worktree from repo-parent path with new branch" {
+  setup_worktree_structure "myrepo"
+
+  # Create a second repo with worktree structure
+  local OTHER_REMOTE="$TEST_TEMP_DIR/other-remote.git"
+  git init --bare "$OTHER_REMOTE" >/dev/null 2>&1
+
+  local OTHER_REPO_PARENT="$TEST_TEMP_DIR/otherrepo"
+  mkdir -p "$OTHER_REPO_PARENT"
+  git clone "$OTHER_REMOTE" "$OTHER_REPO_PARENT/default" >/dev/null 2>&1
+  git -C "$OTHER_REPO_PARENT/default" config user.name "Test"
+  git -C "$OTHER_REPO_PARENT/default" config user.email "test@test.com"
+  git -C "$OTHER_REPO_PARENT/default" checkout -b main >/dev/null 2>&1
+  echo "test" >"$OTHER_REPO_PARENT/default/file.txt"
+  git -C "$OTHER_REPO_PARENT/default" add .
+  git -C "$OTHER_REPO_PARENT/default" commit -m "init" >/dev/null 2>&1
+  git -C "$OTHER_REPO_PARENT/default" push -u origin main >/dev/null 2>&1
+  git -C "$OTHER_REPO_PARENT/default" remote set-head origin main >/dev/null 2>&1
+
+  # From myrepo, create a new branch in otherrepo via path
+  tmux send-keys -t "$TEST_SESSION" "cd $WORKTREE_PARENT/default && gwtmux ../../otherrepo/new-branch" Enter
+  confirm_branch_creation "$TEST_SESSION"
+  wait_for_dir_exists "$OTHER_REPO_PARENT/new-branch"
+
+  # Worktree should be created in otherrepo
+  assert_dir_exists "$OTHER_REPO_PARENT/new-branch"
+
+  # Window should have otherrepo name
+  run get_tmux_windows
+  assert_output --partial "otherrepo/new-branch"
+}
+
+@test "gwtmux: creates worktree from repo-parent path outside any git repo" {
+  setup_worktree_structure "myrepo"
+
+  # Create a non-git directory
+  local OUTSIDE_DIR="$TEST_TEMP_DIR/not-a-repo"
+  mkdir -p "$OUTSIDE_DIR"
+
+  # From outside any git repo, create a new branch in myrepo via path
+  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/new-branch" Enter
+  confirm_branch_creation "$TEST_SESSION"
+  wait_for_dir_exists "$WORKTREE_PARENT/new-branch"
+
+  # Worktree should be created in myrepo
+  assert_dir_exists "$WORKTREE_PARENT/new-branch"
+
+  # Window should have myrepo name
+  run get_tmux_windows
+  assert_output --partial "myrepo/new-branch"
+}
+
+@test "gwtmux: opens existing worktree via repo-parent path without confirmation" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create a worktree
+  git worktree add -b existing-wt "$WORKTREE_PARENT/existing-wt" main >/dev/null 2>&1
+
+  # Create a non-git directory
+  local OUTSIDE_DIR="$TEST_TEMP_DIR/not-a-repo"
+  mkdir -p "$OUTSIDE_DIR"
+
+  # Open existing worktree via repo-parent path - should NOT prompt
+  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/existing-wt" Enter
+  wait_for_window_exists "myrepo/existing-wt"
+
+  # Window should exist (path_matched handled it, no prompt)
+  run get_tmux_windows
+  assert_output --partial "myrepo/existing-wt"
+}
+
+@test "gwtmux: repo-parent path does not affect subsequent args" {
+  setup_worktree_structure "myrepo"
+
+  # Create a second repo with worktree structure
+  local OTHER_REMOTE="$TEST_TEMP_DIR/other-remote2.git"
+  git init --bare "$OTHER_REMOTE" >/dev/null 2>&1
+
+  local OTHER_REPO_PARENT="$TEST_TEMP_DIR/otherrepo"
+  mkdir -p "$OTHER_REPO_PARENT"
+  git clone "$OTHER_REMOTE" "$OTHER_REPO_PARENT/default" >/dev/null 2>&1
+  git -C "$OTHER_REPO_PARENT/default" config user.name "Test"
+  git -C "$OTHER_REPO_PARENT/default" config user.email "test@test.com"
+  git -C "$OTHER_REPO_PARENT/default" checkout -b main >/dev/null 2>&1
+  echo "test" >"$OTHER_REPO_PARENT/default/file.txt"
+  git -C "$OTHER_REPO_PARENT/default" add .
+  git -C "$OTHER_REPO_PARENT/default" commit -m "init" >/dev/null 2>&1
+  git -C "$OTHER_REPO_PARENT/default" push -u origin main >/dev/null 2>&1
+  git -C "$OTHER_REPO_PARENT/default" remote set-head origin main >/dev/null 2>&1
+
+  # From myrepo, create a branch in otherrepo AND a local branch
+  local initial_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux send-keys -t "$initial_window" "cd $WORKTREE_PARENT/default && gwtmux ../../otherrepo/other-feat local-feat" Enter
+  confirm_branch_creation "$initial_window"
+  confirm_branch_creation "$initial_window"
+  wait_for_dir_exists "$WORKTREE_PARENT/local-feat"
+
+  # otherrepo branch should be in otherrepo
+  assert_dir_exists "$OTHER_REPO_PARENT/other-feat"
+
+  # local branch should be in myrepo
+  assert_dir_exists "$WORKTREE_PARENT/local-feat"
+
+  # Windows should show correct repo names
+  run get_tmux_windows
+  assert_output --partial "otherrepo/other-feat"
+  assert_output --partial "myrepo/local-feat"
 }
 
 # ============================================================================

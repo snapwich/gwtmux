@@ -42,6 +42,7 @@ NORMAL MODE:
   gwtmux <branch>          Create worktree for branch, open in new tmux window
   gwtmux <pr_number>       Create worktree for PR's branch (uses gh cli)
   gwtmux <path>            Open existing worktree path in new tmux window
+  gwtmux <repo>/<branch>   Create branch in repo at <repo>/default
   gwtmux branch1 branch2   Create multiple worktrees at once
   gwtmux                   (From parent dir) Open windows for all existing worktrees
 
@@ -620,14 +621,27 @@ EOF
       fi
     fi
 
+    # Save original git context for restoring per-iteration
+    local orig_git_root="$git_root"
+    local orig_repo_name="$repo_name"
+    local orig_default_branch="$default_branch"
+    local orig_has_git_root="$has_git_root"
+
     # Track if any worktree succeeded (for window reuse logic)
     local success_count=0
 
     # Declare loop variables outside the loop to avoid re-declaration issues
-    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc
+    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched
 
     # Process each argument
     for arg in "$@"; do
+      # Restore git context for each iteration
+      git_root="$orig_git_root"
+      repo_name="$orig_repo_name"
+      default_branch="$orig_default_branch"
+      has_git_root="$orig_has_git_root"
+      repo_path_matched=0
+
       # Check if argument is a path to an existing worktree (can be any repo)
       local path_matched=0
       local path_repo_name=""
@@ -664,8 +678,41 @@ EOF
         fi
       fi
 
+      # If not an existing path, check if parent dir is a repo parent (contains default/.git)
+      if [[ $path_matched -eq 0 && ( "$arg" == /* || "$arg" == .* || "$arg" == */* ) ]]; then
+        local arg_parent arg_basename resolved_parent
+        arg_parent="$(dirname -- "$arg")"
+        arg_basename="$(basename -- "$arg")"
+        if [[ -d "$arg_parent" ]]; then
+          resolved_parent="$(cd "$arg_parent" 2>/dev/null && pwd -P)"
+          if [[ -n "$resolved_parent" && -d "$resolved_parent/default/.git" ]]; then
+            # Override git context for this iteration
+            git_root="$resolved_parent/default"
+            has_git_root=1
+            repo_name="$(basename "$resolved_parent")"
+            $git_cmd -C "$git_root" fetch -a 2>/dev/null || true
+            # Compute default_branch for this repo
+            default_branch="$(
+              $git_cmd -C "$git_root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null |
+                sed 's|^origin/||'
+            )"
+            if [[ -z "$default_branch" ]]; then
+              if $git_cmd -C "$git_root" show-ref --verify --quiet refs/remotes/origin/main; then
+                default_branch="main"
+              elif $git_cmd -C "$git_root" show-ref --verify --quiet refs/remotes/origin/master; then
+                default_branch="master"
+              else
+                default_branch="main"
+              fi
+            fi
+            branch="$arg_basename"
+            repo_path_matched=1
+          fi
+        fi
+      fi
+
       # If not a path, resolve branch name (try gh pr first, fall back to arg)
-      if [[ $path_matched -eq 0 ]]; then
+      if [[ $path_matched -eq 0 && $repo_path_matched -eq 0 ]]; then
         if [[ $has_git_root -eq 0 ]]; then
           echo >&2 "Error: not in a git repo or parent of default/.git"
           return 1
@@ -715,6 +762,13 @@ EOF
         elif [[ $has_remote -eq 0 ]]; then
           $git_cmd -C "$git_root" worktree add --quiet -b "$branch" -- "$worktree_path" "origin/$branch" || rc=$?
         else
+          local confirm=""
+          printf "Create new branch '%s'? [Y/n] " "$branch"
+          read -r confirm </dev/tty
+          if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
+            echo "Skipping '$branch'"
+            continue
+          fi
           $git_cmd -C "$git_root" worktree add --quiet -b "$branch" -- "$worktree_path" "$default_branch" || rc=$?
         fi
         if [[ $rc -ne 0 ]]; then
