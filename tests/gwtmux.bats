@@ -364,11 +364,11 @@ myrepo/existing"
   # From myrepo, open the other repo's default worktree via relative path
   # This tests the .git case where git-common-dir returns ".git"
   tmux send-keys -t "$TEST_SESSION" "cd $WORKTREE_PARENT/default && gwtmux ../../otherrepo/default" Enter
-  wait_until "get_tmux_windows | grep -E 'otherrepo/(master|main)'"
+  wait_until "get_tmux_windows | grep -q 'otherrepo/default'"
 
-  # Window should have correct repo name "otherrepo" (not "default")
+  # Window should use directory name "default" (not the branch name)
   run get_tmux_windows
-  assert_output --regexp "otherrepo/(master|main)"
+  assert_output --partial "otherrepo/default"
 }
 
 # ----------------------------------------------------------------------------

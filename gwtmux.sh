@@ -650,30 +650,28 @@ EOF
           local resolved_path
           resolved_path="$(cd "$arg" 2>/dev/null && pwd -P)"
           if [[ -n "$resolved_path" ]] && $git_cmd -C "$resolved_path" rev-parse --git-dir &>/dev/null; then
-            # It's a git directory - extract branch and repo info
-            branch="$($git_cmd -C "$resolved_path" branch --show-current 2>/dev/null)"
-            if [[ -n "$branch" ]]; then
-              # Get repo name from this path's git structure
-              local path_git_common_dir
-              path_git_common_dir="$($git_cmd -C "$resolved_path" rev-parse --git-common-dir 2>/dev/null)"
-              if [[ -n "$path_git_common_dir" ]]; then
-                local path_git_root
-                if [[ "$path_git_common_dir" == /* ]]; then
-                  # Absolute path (worktree case)
-                  path_git_root="$(dirname "$path_git_common_dir")"
-                elif [[ "$path_git_common_dir" == ".git" ]]; then
-                  # Main repo case - .git is in resolved_path
-                  path_git_root="$resolved_path"
-                else
-                  # Relative path to .git
-                  path_git_root="$(cd "$resolved_path/$(dirname "$path_git_common_dir")" && pwd -P)"
-                fi
-                path_repo_name="$(basename "$(dirname "$path_git_root")")"
+            # It's a git directory - use directory name as branch label
+            branch="$(basename "$resolved_path")"
+            # Get repo name from this path's git structure
+            local path_git_common_dir
+            path_git_common_dir="$($git_cmd -C "$resolved_path" rev-parse --git-common-dir 2>/dev/null)"
+            if [[ -n "$path_git_common_dir" ]]; then
+              local path_git_root
+              if [[ "$path_git_common_dir" == /* ]]; then
+                # Absolute path (worktree case)
+                path_git_root="$(dirname "$path_git_common_dir")"
+              elif [[ "$path_git_common_dir" == ".git" ]]; then
+                # Main repo case - .git is in resolved_path
+                path_git_root="$resolved_path"
+              else
+                # Relative path to .git
+                path_git_root="$(cd "$resolved_path/$(dirname "$path_git_common_dir")" && pwd -P)"
               fi
-              worktree_path="$resolved_path"
-              worktree_exists=1
-              path_matched=1
+              path_repo_name="$(basename "$(dirname "$path_git_root")")"
             fi
+            worktree_path="$resolved_path"
+            worktree_exists=1
+            path_matched=1
           fi
         fi
       fi
