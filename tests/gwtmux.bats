@@ -199,6 +199,37 @@ teardown() {
   assert_dir_exists "$WORKTREE_PARENT/new-feature"
   run get_tmux_windows
   assert_output --partial "myrepo/new-feature"
+
+  # Verify new branch is based on origin/main, not local main
+  local origin_head local_head branch_head
+  origin_head="$(git -C "$MAIN_REPO" rev-parse origin/main)"
+  local_head="$(git -C "$MAIN_REPO" rev-parse main)"
+  branch_head="$(git -C "$WORKTREE_PARENT/new-feature" rev-parse HEAD)"
+  # In this setup local and remote are the same, so also check the diverged case below
+  assert_equal "$branch_head" "$origin_head"
+}
+
+@test "gwtmux: new branch bases off origin/main, not local main" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Advance origin/main beyond local main
+  git -C "$BARE_REPO" commit --allow-empty -m "remote-only-commit"
+  git -C "$MAIN_REPO" fetch origin
+
+  local origin_head local_head
+  origin_head="$(git -C "$MAIN_REPO" rev-parse origin/main)"
+  local_head="$(git -C "$MAIN_REPO" rev-parse main)"
+  # Confirm they actually diverged
+  assert_not_equal "$origin_head" "$local_head"
+
+  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux remote-branch 2>&1; echo EXIT_CODE:\$?" Enter
+  confirm_branch_creation "$TEST_SESSION"
+  wait_for_dir_exists "$WORKTREE_PARENT/remote-branch"
+
+  local branch_head
+  branch_head="$(git -C "$WORKTREE_PARENT/remote-branch" rev-parse HEAD)"
+  assert_equal "$branch_head" "$origin_head"
 }
 
 @test "gwtmux: creates worktree from existing local branch" {
