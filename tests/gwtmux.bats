@@ -232,6 +232,21 @@ teardown() {
   assert_equal "$branch_head" "$origin_head"
 }
 
+@test "gwtmux: new branch has no upstream tracking" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux no-track-test 2>&1; echo EXIT_CODE:\$?" Enter
+  confirm_branch_creation "$TEST_SESSION"
+  wait_for_dir_exists "$WORKTREE_PARENT/no-track-test"
+
+  # New branches should not track origin/main
+  run git -C "$WORKTREE_PARENT/no-track-test" config branch.no-track-test.remote
+  assert_failure
+  run git -C "$WORKTREE_PARENT/no-track-test" config branch.no-track-test.merge
+  assert_failure
+}
+
 @test "gwtmux: creates worktree from existing local branch" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"

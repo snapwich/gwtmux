@@ -767,7 +767,7 @@ EOF
             echo "Skipping '$branch'"
             continue
           fi
-          $git_cmd -C "$git_root" worktree add --quiet -b "$branch" -- "$worktree_path" "origin/$default_branch" || rc=$?
+          $git_cmd -C "$git_root" worktree add --quiet --no-track -b "$branch" -- "$worktree_path" "origin/$default_branch" || rc=$?
         fi
         if [[ $rc -ne 0 ]]; then
           echo >&2 "Warning: failed to create worktree for '$branch', skipping"
