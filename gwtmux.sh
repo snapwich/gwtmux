@@ -544,7 +544,7 @@ EOF
 
     if [[ $# -eq 0 ]]; then
       # Multi-worktree mode - only works from ../default
-      if [[ ! -d "default/.git" ]]; then
+      if ! $git_cmd -C "$PWD/default" rev-parse --git-dir &>/dev/null; then
         echo >&2 "Error: branch or PR number required"
         return 1
       fi
@@ -592,7 +592,7 @@ EOF
         git_root="$PWD/$(dirname -- "$git_common_dir")"
       fi
       has_git_root=1
-    elif [[ -d "default/.git" ]]; then
+    elif [[ -d "default" ]] && $git_cmd -C "$PWD/default" rev-parse --git-dir &>/dev/null; then
       git_root="$PWD/default"
       has_git_root=1
     fi
@@ -633,8 +633,14 @@ EOF
     # Declare loop variables outside the loop to avoid re-declaration issues
     local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched
 
+    # Save original directory for resolving relative args after cd
+    local orig_pwd="$PWD"
+
     # Process each argument
     for arg in "$@"; do
+      # Restore working directory for relative path resolution
+      cd "$orig_pwd"
+
       # Restore git context for each iteration
       git_root="$orig_git_root"
       repo_name="$orig_repo_name"
@@ -683,7 +689,7 @@ EOF
         arg_basename="$(basename -- "$arg")"
         if [[ -d "$arg_parent" ]]; then
           resolved_parent="$(cd "$arg_parent" 2>/dev/null && pwd -P)"
-          if [[ -n "$resolved_parent" && -d "$resolved_parent/default/.git" ]]; then
+          if [[ -n "$resolved_parent" && -d "$resolved_parent/default" ]] && $git_cmd -C "$resolved_parent/default" rev-parse --git-dir &>/dev/null; then
             # Override git context for this iteration
             git_root="$resolved_parent/default"
             has_git_root=1

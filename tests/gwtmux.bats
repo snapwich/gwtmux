@@ -919,6 +919,34 @@ myrepo/existing"
   assert_output --partial "myrepo/existing-wt"
 }
 
+@test "gwtmux: opens multiple existing worktrees via repo-parent paths from outside git" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create two worktrees
+  git worktree add -b feat-one "$WORKTREE_PARENT/feat-one" main >/dev/null 2>&1
+  git worktree add -b feat-two "$WORKTREE_PARENT/feat-two" main >/dev/null 2>&1
+
+  # Go outside any git repo
+  local OUTSIDE_DIR="$TEST_TEMP_DIR/not-a-repo"
+  mkdir -p "$OUTSIDE_DIR"
+
+  # Rename window to shell name so can_reuse_window=1 — this triggers the cd
+  # on the first arg that was breaking relative path resolution for subsequent args
+  local shell_name=$(basename "${SHELL:-zsh}")
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux rename-window -t "$first_window" "$shell_name"
+
+  # Open both worktrees via repo-parent paths
+  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/feat-one ../myrepo/feat-two" Enter
+  wait_for_window_exists "myrepo/feat-one"
+  wait_for_window_exists "myrepo/feat-two"
+
+  run get_tmux_windows
+  assert_output --partial "myrepo/feat-one"
+  assert_output --partial "myrepo/feat-two"
+}
+
 @test "gwtmux: repo-parent path does not affect subsequent args" {
   setup_worktree_structure "myrepo"
 
