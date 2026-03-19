@@ -631,10 +631,11 @@ EOF
     local success_count=0
 
     # Declare loop variables outside the loop to avoid re-declaration issues
-    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched
+    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched pr_branch arg_parent arg_basename resolved_parent path_matched path_repo_name resolved_path path_git_common_dir path_git_root
 
     # Save original directory for resolving relative args after cd
     local orig_pwd="$PWD"
+    local reused_window_path=""
 
     # Process each argument
     for arg in "$@"; do
@@ -649,20 +650,17 @@ EOF
       repo_path_matched=0
 
       # Check if argument is a path to an existing worktree (can be any repo)
-      local path_matched=0
-      local path_repo_name=""
+      path_matched=0
+      path_repo_name=""
       if [[ "$arg" == /* || "$arg" == .* || "$arg" == */* ]]; then
         if [[ -d "$arg" ]]; then
-          local resolved_path
           resolved_path="$(cd "$arg" 2>/dev/null && pwd -P)"
           if [[ -n "$resolved_path" ]] && $git_cmd -C "$resolved_path" rev-parse --git-dir &>/dev/null; then
             # It's a git directory - use directory name as branch label
             branch="$(basename "$resolved_path")"
             # Get repo name from this path's git structure
-            local path_git_common_dir
             path_git_common_dir="$($git_cmd -C "$resolved_path" rev-parse --git-common-dir 2>/dev/null)"
             if [[ -n "$path_git_common_dir" ]]; then
-              local path_git_root
               if [[ "$path_git_common_dir" == /* ]]; then
                 # Absolute path (worktree case)
                 path_git_root="$(dirname "$path_git_common_dir")"
@@ -684,7 +682,6 @@ EOF
 
       # If not an existing path, check if parent dir is a repo parent (contains default/.git)
       if [[ $path_matched -eq 0 && ( "$arg" == /* || "$arg" == .* || "$arg" == */* ) ]]; then
-        local arg_parent arg_basename resolved_parent
         arg_parent="$(dirname -- "$arg")"
         arg_basename="$(basename -- "$arg")"
         if [[ -d "$arg_parent" ]]; then
@@ -710,6 +707,11 @@ EOF
               fi
             fi
             branch="$arg_basename"
+            # Resolve PR numbers via gh (same as non-path branch resolution)
+            pr_branch="$(
+              (cd "$git_root" 2>/dev/null && GH_PAGER= gh pr view "$arg_basename" --json headRefName --jq '.headRefName') 2>/dev/null
+            )"
+            [[ -n "$pr_branch" ]] && branch="$pr_branch"
             repo_path_matched=1
           fi
         fi
@@ -784,7 +786,7 @@ EOF
       # Create or reuse window
       if [[ $success_count -eq 0 && $can_reuse_window -eq 1 ]]; then
         tmux rename-window "$window_name"
-        cd "$worktree_path"
+        reused_window_path="$worktree_path"
       else
         tmux new-window -n "$window_name" -c "$worktree_path"
       fi
@@ -792,14 +794,9 @@ EOF
       success_count=$((success_count + 1))
     done
 
-    # Kill original zsh window only if we succeeded with at least one worktree
-    # and we didn't reuse it (reuse happens when success_count > 0 and can_reuse_window was 1)
-    if [[ $success_count -gt 0 && $can_reuse_window -eq 1 ]]; then
-      # Window was already reused, don't kill it
-      :
-    elif [[ $success_count -gt 0 && $can_reuse_window -eq 0 ]]; then
-      # Created new windows but didn't reuse, nothing to do
-      :
+    # cd into reused window's worktree (deferred to avoid being undone by loop's cd "$orig_pwd")
+    if [[ -n "$reused_window_path" ]]; then
+      cd "$reused_window_path"
     fi
     ;;
   esac

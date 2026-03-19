@@ -111,6 +111,18 @@ EOF
   chmod +x "$STUB_DIR/gh"
 }
 
+stub_gh_pr_multi() {
+  # Usage: stub_gh_pr_multi "123" "branch-a" "456" "branch-b"
+  local script='#!/bin/bash\n'
+  while [[ $# -ge 2 ]]; do
+    script+="if [[ \"\$1\" == \"pr\" && \"\$2\" == \"view\" && \"\$3\" == \"$1\" ]]; then echo \"$2\"; exit 0; fi\n"
+    shift 2
+  done
+  script+='exit 1'
+  printf "$script" > "$STUB_DIR/gh"
+  chmod +x "$STUB_DIR/gh"
+}
+
 # Get tmux windows for test session
 get_tmux_windows() {
   tmux list-windows -t "$TEST_SESSION" -F "#W" 2>/dev/null || true
@@ -983,6 +995,49 @@ myrepo/existing"
   run get_tmux_windows
   assert_output --partial "otherrepo/other-feat"
   assert_output --partial "myrepo/local-feat"
+}
+
+@test "gwtmux: resolves PR number in repo-parent path" {
+  setup_worktree_structure "myrepo"
+  stub_gh_pr "456" "pr-456-feature"
+
+  local OUTSIDE_DIR="$TEST_TEMP_DIR/not-a-repo"
+  mkdir -p "$OUTSIDE_DIR"
+
+  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/456" Enter
+  confirm_branch_creation "$TEST_SESSION"
+  wait_for_dir_exists "$WORKTREE_PARENT/pr-456-feature"
+
+  assert_dir_exists "$WORKTREE_PARENT/pr-456-feature"
+  run get_tmux_windows
+  assert_output --partial "myrepo/pr-456-feature"
+}
+
+@test "gwtmux: resolves multiple PR numbers in repo-parent paths" {
+  setup_worktree_structure "myrepo"
+  stub_gh_pr_multi "123" "pr-123-feat" "456" "pr-456-fix"
+
+  local OUTSIDE_DIR="$TEST_TEMP_DIR/not-a-repo"
+  mkdir -p "$OUTSIDE_DIR"
+
+  local shell_name=$(basename "${SHELL:-zsh}")
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux rename-window -t "$first_window" "$shell_name"
+
+  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/123 ../myrepo/456" Enter
+  confirm_branch_creation "$TEST_SESSION"
+  wait_for_dir_exists "$WORKTREE_PARENT/pr-123-feat"
+  confirm_branch_creation "$TEST_SESSION"
+  wait_for_dir_exists "$WORKTREE_PARENT/pr-456-fix"
+
+  run get_tmux_windows
+  assert_output --partial "myrepo/pr-123-feat"
+  assert_output --partial "myrepo/pr-456-fix"
+
+  # Verify first window (reused shell) ended up in correct worktree dir
+  local first_wt_pane_path
+  first_wt_pane_path=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_name} #{pane_current_path}" | grep "pr-123-feat" | awk '{print $2}')
+  [[ "$first_wt_pane_path" == *"/pr-123-feat" ]]
 }
 
 # ============================================================================
