@@ -17,6 +17,55 @@ _gwtmux_check_deps() {
   fi
 }
 
+# Find worktrees nested under a given worktree path
+# Sets caller's _nested_worktrees array
+_gwtmux_find_nested_worktrees() {
+  local git_root="$1"
+  local parent_path="$2"
+  _nested_worktrees=()
+
+  local wt_path
+  while IFS= read -r wt_path; do
+    if [[ "$wt_path" == "$parent_path"/* ]]; then
+      _nested_worktrees+=("$wt_path")
+    fi
+  done < <(git -C "$git_root" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}')
+}
+
+# Remove nested worktrees and optionally their branches
+# Args: git_root delete_local delete_remote nested_paths...
+_gwtmux_remove_nested_worktrees() {
+  local git_root="$1"
+  local delete_local="$2"
+  local delete_remote="$3"
+  shift 3
+
+  local nwt_path nwt_branch force_flag
+  for nwt_path in "$@"; do
+    nwt_branch="$(git -C "$nwt_path" branch --show-current 2>/dev/null)"
+
+    force_flag=""
+    [[ $delete_local -eq 2 ]] && force_flag="--force"
+    git -C "$git_root" worktree remove $force_flag "$nwt_path" || {
+      echo >&2 "Error: failed to remove nested worktree '$nwt_path'"
+      return 1
+    }
+
+    if [[ -n "$nwt_branch" && $delete_local -gt 0 ]]; then
+      if [[ $delete_local -eq 1 ]]; then
+        git -C "$git_root" branch -d "$nwt_branch" 2>/dev/null || true
+      else
+        git -C "$git_root" branch -D "$nwt_branch" 2>/dev/null || true
+      fi
+      if [[ $delete_remote -eq 1 ]]; then
+        if git -C "$git_root" show-ref --verify --quiet "refs/remotes/origin/$nwt_branch"; then
+          git -C "$git_root" push origin --delete "$nwt_branch" 2>/dev/null || true
+        fi
+      fi
+    fi
+  done
+}
+
 # create a git worktree from branch or pr number in new tmux window
 # with -d flag: clean up git worktree (delete worktree/branches, kill/rename tmux window)
 # with --rename flag: rename worktree dir, branch, remote tracking branch, and tmux window
@@ -221,10 +270,36 @@ EOF
         fi
       fi
 
+      # Check for nested worktrees when deleting worktree directory
+      local -a _nested_worktrees=()
+      if [[ $delete_worktree -eq 1 ]]; then
+        _gwtmux_find_nested_worktrees "$(dirname "$git_common_dir")" "$worktree_root"
+        if [[ ${#_nested_worktrees[@]} -gt 0 ]]; then
+          echo "Worktree '$(basename "$worktree_root")' has nested worktrees:"
+          for nwt in "${_nested_worktrees[@]}"; do
+            echo "  - $nwt"
+          done
+          printf "Remove nested worktrees? No cancels the entire operation. [y/N] "
+          local confirm_nested
+          read -r confirm_nested </dev/tty
+          if [[ "$confirm_nested" != "y" && "$confirm_nested" != "Y" ]]; then
+            return 1
+          fi
+        fi
+      fi
+
       # Remove worktree if requested
       if [[ $delete_worktree -eq 1 ]]; then
         local original_dir="$PWD"
         cd "$(dirname "$git_common_dir")"
+        # Remove nested worktrees before parent
+        if [[ ${#_nested_worktrees[@]} -gt 0 ]]; then
+          _gwtmux_remove_nested_worktrees "$(dirname "$git_common_dir")" "$delete_local" "$delete_remote" "${_nested_worktrees[@]}" || {
+            local rc=$?
+            cd "$original_dir"
+            return $rc
+          }
+        fi
         git worktree remove "$worktree_root" || {
           local rc=$?
           cd "$original_dir"
@@ -332,6 +407,28 @@ EOF
         window_names+=("$repo_name/$wt_branch")
       done
 
+      # Check for nested worktrees across all parents
+      local -a _all_nested_worktrees=()
+      if [[ $delete_worktree -eq 1 ]]; then
+        local -a _nested_worktrees=()
+        for wt_path in "${worktree_paths[@]}"; do
+          _gwtmux_find_nested_worktrees "$git_root" "$wt_path"
+          [[ ${#_nested_worktrees[@]} -gt 0 ]] && _all_nested_worktrees+=("${_nested_worktrees[@]}")
+        done
+        if [[ ${#_all_nested_worktrees[@]} -gt 0 ]]; then
+          echo "Nested worktrees found that will also be removed:"
+          for nwt in "${_all_nested_worktrees[@]}"; do
+            echo "  - $nwt"
+          done
+          printf "Remove nested worktrees? No cancels the entire operation. [y/N] "
+          local confirm_nested
+          read -r confirm_nested </dev/tty
+          if [[ "$confirm_nested" != "y" && "$confirm_nested" != "Y" ]]; then
+            return 1
+          fi
+        fi
+      fi
+
       # ====================================================================
       # PHASE 2: EXECUTION - All validations passed, proceed with deletions
       # ====================================================================
@@ -358,6 +455,16 @@ EOF
         if [[ $delete_worktree -eq 1 ]]; then
           local original_dir="$PWD"
           cd "$parent_dir"
+          # Remove nested worktrees before parent
+          local -a _nested_worktrees=()
+          _gwtmux_find_nested_worktrees "$git_root" "$wt_path"
+          if [[ ${#_nested_worktrees[@]} -gt 0 ]]; then
+            _gwtmux_remove_nested_worktrees "$git_root" "$delete_local" "$delete_remote" "${_nested_worktrees[@]}" || {
+              echo >&2 "Error: failed to remove nested worktrees for '$wt_path'"
+              cd "$original_dir" 2>/dev/null || true
+              return 1
+            }
+          fi
           git -C "$git_root" worktree remove "$wt_path" || {
             echo >&2 "Warning: failed to remove worktree at '$wt_path'"
           }

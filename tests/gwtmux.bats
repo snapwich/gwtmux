@@ -43,6 +43,18 @@ confirm_branch_creation() {
   tmux send-keys -t "$target" "y" Enter
 }
 
+# Confirm or deny nested worktree removal prompt
+confirm_nested_worktree_removal() {
+  local target="${1:-$TEST_SESSION}"
+  wait_until "tmux capture-pane -t '$target' -p | grep -q 'Remove nested worktrees'"
+  tmux send-keys -t "$target" "y" Enter
+}
+deny_nested_worktree_removal() {
+  local target="${1:-$TEST_SESSION}"
+  wait_until "tmux capture-pane -t '$target' -p | grep -q 'Remove nested worktrees'"
+  tmux send-keys -t "$target" "n" Enter
+}
+
 # Setup a basic git repository with a bare remote
 setup_git_repos() {
   # Create bare "remote" repository
@@ -2137,4 +2149,171 @@ myrepo/existing"
   assert_output --partial "wt-1"
 
   rm -f "$marker_file"
+}
+
+# ----------------------------------------------------------------------------
+# Nested worktree cleanup
+# ----------------------------------------------------------------------------
+
+@test "gwtmux -d: prompts and removes nested worktrees (single worktree, confirm)" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create parent worktree
+  git worktree add "$WORKTREE_PARENT/parent-wt" -b parent-wt main >/dev/null 2>&1
+
+  # Create nested worktrees inside parent
+  git worktree add "$WORKTREE_PARENT/parent-wt/nested1" -b nested1 main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/parent-wt/nested2" -b nested2 main >/dev/null 2>&1
+
+  # Open tmux window for parent
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/parent-wt" -c "$WORKTREE_PARENT/parent-wt" 2>/dev/null
+
+  # Run delete from parent worktree
+  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/parent-wt && gwtmux -d -wB" Enter
+
+  # Confirm nested removal
+  confirm_nested_worktree_removal "$TEST_SESSION:1"
+
+  # Wait for parent to be deleted
+  wait_for_dir_deleted "$WORKTREE_PARENT/parent-wt"
+
+  # All worktrees should be gone
+  refute [ -d "$WORKTREE_PARENT/parent-wt" ]
+
+  # All branches should be deleted
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "parent-wt"
+  refute_output --partial "nested1"
+  refute_output --partial "nested2"
+}
+
+@test "gwtmux -d: cancels when nested worktree removal denied (single worktree)" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create parent worktree
+  git worktree add "$WORKTREE_PARENT/parent-wt" -b parent-wt main >/dev/null 2>&1
+
+  # Create nested worktree
+  git worktree add "$WORKTREE_PARENT/parent-wt/nested1" -b nested1 main >/dev/null 2>&1
+
+  # Open tmux window for parent
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/parent-wt" -c "$WORKTREE_PARENT/parent-wt" 2>/dev/null
+
+  # Run delete from parent worktree
+  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/parent-wt && gwtmux -d -wB" Enter
+
+  # Deny nested removal
+  deny_nested_worktree_removal "$TEST_SESSION:1"
+  sleep 0.5
+
+  # Everything should still exist
+  assert_dir_exists "$WORKTREE_PARENT/parent-wt"
+  assert_dir_exists "$WORKTREE_PARENT/parent-wt/nested1"
+
+  # Branches should still exist
+  run git -C "$MAIN_REPO" branch
+  assert_output --partial "parent-wt"
+  assert_output --partial "nested1"
+}
+
+@test "gwtmux -d: no prompt when no nested worktrees" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/test-wt" -b test-wt main >/dev/null 2>&1
+
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/test-wt" -c "$WORKTREE_PARENT/test-wt" 2>/dev/null
+
+  # This should work without any prompt
+  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wB" Enter
+  wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+
+  refute [ -d "$WORKTREE_PARENT/test-wt" ]
+}
+
+@test "gwtmux -d: removes nested worktrees with detached HEAD" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create parent worktree
+  git worktree add "$WORKTREE_PARENT/parent-wt" -b parent-wt main >/dev/null 2>&1
+
+  # Create nested worktree on detached HEAD (no branch)
+  local commit_hash=$(git -C "$MAIN_REPO" rev-parse HEAD)
+  git worktree add --detach "$WORKTREE_PARENT/parent-wt/tmp/abc123" "$commit_hash" >/dev/null 2>&1
+
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/parent-wt" -c "$WORKTREE_PARENT/parent-wt" 2>/dev/null
+
+  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/parent-wt && gwtmux -d -wB" Enter
+
+  confirm_nested_worktree_removal "$TEST_SESSION:1"
+  wait_for_dir_deleted "$WORKTREE_PARENT/parent-wt"
+
+  refute [ -d "$WORKTREE_PARENT/parent-wt" ]
+
+  # Parent branch should be deleted
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "parent-wt"
+}
+
+@test "gwtmux -d: multi-worktree removes nested worktrees (confirm)" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Create two parent worktrees each with nested
+  git worktree add "$WORKTREE_PARENT/wt-a" -b wt-a main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/wt-a/child" -b child-a main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/wt-b" -b wt-b main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/wt-b/child" -b child-b main >/dev/null 2>&1
+
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/wt-a" -c "$WORKTREE_PARENT/wt-a" 2>/dev/null
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/wt-b" -c "$WORKTREE_PARENT/wt-b" 2>/dev/null
+
+  # Use a new window for running the delete command from main repo
+  tmux new-window -t "$TEST_SESSION" -n "runner" -c "$MAIN_REPO" 2>/dev/null
+  local runner_window="$TEST_SESSION:runner"
+
+  tmux send-keys -t "$runner_window" "gwtmux -dwB wt-a wt-b" Enter
+
+  confirm_nested_worktree_removal "$runner_window"
+  wait_for_dir_deleted "$WORKTREE_PARENT/wt-a"
+  wait_for_dir_deleted "$WORKTREE_PARENT/wt-b"
+
+  refute [ -d "$WORKTREE_PARENT/wt-a" ]
+  refute [ -d "$WORKTREE_PARENT/wt-b" ]
+
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "wt-a"
+  refute_output --partial "wt-b"
+  refute_output --partial "child-a"
+  refute_output --partial "child-b"
+}
+
+@test "gwtmux -d: multi-worktree cancels when nested denial" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/wt-a" -b wt-a main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/wt-a/child" -b child-a main >/dev/null 2>&1
+
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/wt-a" -c "$WORKTREE_PARENT/wt-a" 2>/dev/null
+
+  # Use a new window for running the delete command from main repo
+  tmux new-window -t "$TEST_SESSION" -n "runner" -c "$MAIN_REPO" 2>/dev/null
+  local runner_window="$TEST_SESSION:runner"
+
+  tmux send-keys -t "$runner_window" "gwtmux -dwB wt-a" Enter
+
+  deny_nested_worktree_removal "$runner_window"
+  sleep 0.5
+
+  # Everything should still exist
+  assert_dir_exists "$WORKTREE_PARENT/wt-a"
+  assert_dir_exists "$WORKTREE_PARENT/wt-a/child"
+
+  run git -C "$MAIN_REPO" branch
+  assert_output --partial "wt-a"
+  assert_output --partial "child-a"
 }
