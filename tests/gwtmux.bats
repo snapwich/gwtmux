@@ -1078,10 +1078,10 @@ myrepo/existing"
   git commit -m "Test commit" >/dev/null 2>&1
 
   # Create tmux window
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/old-name" -c "$WORKTREE_PARENT/old-name" 2>/dev/null
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/old-name" -c "$WORKTREE_PARENT/old-name" -P -F "#{window_id}")
 
-  # Rename
-  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/old-name && gwtmux --rename new-name" Enter
+  # Rename (run from the worktree's own window - gwtmux targets the invoking window)
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/old-name && gwtmux --rename new-name" Enter
   wait_for_dir_exists "$WORKTREE_PARENT/new-name"
 
   # Verify directory renamed
@@ -1114,10 +1114,10 @@ myrepo/existing"
   git push -u origin old-name >/dev/null 2>&1
 
   # Create tmux window
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/old-name" -c "$WORKTREE_PARENT/old-name" 2>/dev/null
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/old-name" -c "$WORKTREE_PARENT/old-name" -P -F "#{window_id}")
 
   # Rename
-  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/old-name && gwtmux --rename new-name" Enter
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/old-name && gwtmux --rename new-name" Enter
   wait_for_dir_exists "$WORKTREE_PARENT/new-name"
 
   # Verify remote branch was renamed
@@ -1142,9 +1142,9 @@ myrepo/existing"
   git add test.txt
   git commit -m "Test" >/dev/null 2>&1
 
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/old-name" -c "$WORKTREE_PARENT/old-name" 2>/dev/null
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/old-name" -c "$WORKTREE_PARENT/old-name" -P -F "#{window_id}")
 
-  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/old-name && gwtmux --rename feature/new-name" Enter
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/old-name && gwtmux --rename feature/new-name" Enter
   wait_for_dir_exists "$WORKTREE_PARENT/feature_new-name"
 
   # Directory should use underscores
@@ -1281,10 +1281,10 @@ myrepo/existing"
   git config user.name "Test User"
   git config user.email "test@example.com"
 
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" 2>/dev/null
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
   local window_count_before=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
 
-  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/test-wt && gwtmux -d" Enter
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d" Enter
   wait_for_window_closed "myrepo/test-branch"
 
   # Worktree should still exist
@@ -1361,9 +1361,9 @@ myrepo/existing"
   git add test.txt
   git commit -m "Unmerged commit" >/dev/null 2>&1
 
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" 2>/dev/null
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
-  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wB" Enter
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wB" Enter
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
 
   # Both should be removed despite not being merged
@@ -1415,9 +1415,9 @@ myrepo/existing"
   git commit -m "Unmerged commit" >/dev/null 2>&1
   git push -u origin test-branch >/dev/null 2>&1
 
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" 2>/dev/null
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
-  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wBr" Enter
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wBr" Enter
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
 
   # Everything should be deleted
@@ -1622,9 +1622,9 @@ myrepo/existing"
   git config user.name "Test User"
   git config user.email "test@example.com"
 
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" 2>/dev/null
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
-  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -w" Enter
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -w" Enter
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
 
   # Worktree should be removed
@@ -1700,16 +1700,37 @@ myrepo/existing"
   git config user.email "test@example.com"
 
   # Create a second window so we have multiple
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" 2>/dev/null
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
   local window_count_before=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
   assert [ "$window_count_before" -gt 1 ]
 
-  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/test-wt && gwtmux -d" Enter
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d" Enter
   wait_for_window_closed "myrepo/test-branch"
 
   # Window should be killed
   local window_count_after=$(tmux list-windows -t "$TEST_SESSION" 2>/dev/null | wc -l)
   assert [ "$window_count_after" -lt "$window_count_before" ]
+}
+
+@test "gwtmux -d: kills invoking window even when another window is active" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/test-wt" -b test-branch main >/dev/null 2>&1
+
+  local wt_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
+  local bystander=$(tmux new-window -t "$TEST_SESSION" -n "bystander" -c "$MAIN_REPO" -P -F "#{window_id}")
+
+  # Focus a different window - gwtmux must still act on the window it runs in
+  tmux select-window -t "$bystander"
+
+  tmux send-keys -t "$wt_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d" Enter
+  wait_for_window_closed "myrepo/test-branch"
+
+  # The worktree's window is gone, the focused bystander window survives
+  run get_tmux_windows
+  refute_output --partial "myrepo/test-branch"
+  assert_output --partial "bystander"
 }
 
 # ----------------------------------------------------------------------------

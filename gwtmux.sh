@@ -4,6 +4,28 @@
 # Create git worktrees from branches or PR numbers in new tmux windows.
 # Manage worktree lifecycle with cleanup and rename operations.
 
+# display-message pinned to the invoking pane. Without -t, tmux resolves
+# formats against the *active* pane, so if the user switches windows while a
+# command runs, bare calls report the wrong window. TMUX_PANE is set by tmux
+# in each pane's environment and is immune to focus changes.
+_gwtmux_display() {
+  if [[ -n "${TMUX_PANE:-}" ]]; then
+    tmux display-message -p -t "$TMUX_PANE" "$1"
+  else
+    tmux display-message -p "$1"
+  fi
+}
+
+# Resolve an exact window name to its window id within a session.
+# Window ids (@N) are stable; names and indexes can change mid-operation.
+_gwtmux_window_id_by_name() {
+  tmux list-windows -t "$1" -F "#{window_id} #{window_name}" 2>/dev/null |
+    awk -v name="$2" '{
+      win_name = substr($0, index($0, " ") + 1)
+      if (win_name == name) { print $1; exit }
+    }'
+}
+
 # Dependency check helper
 _gwtmux_check_deps() {
   local missing=()
@@ -131,6 +153,15 @@ REQUIREMENTS:
 For more info: https://github.com/snapwich/gwtmux
 EOF
     return 0
+  fi
+
+  # Pin tmux context to the invoking pane up front. All later tmux operations
+  # target these ids so the command behaves the same whether or not the user
+  # switches or rearranges windows while it runs.
+  local gwt_window="" gwt_session=""
+  if [[ -n "$TMUX" ]]; then
+    gwt_window="$(_gwtmux_display '#{window_id}' 2>/dev/null)"
+    gwt_session="$(_gwtmux_display '#{session_id}' 2>/dev/null)"
   fi
 
   # Detect mode based on flags
@@ -328,16 +359,16 @@ EOF
       fi
 
       # Smart window handling: rename if last window, otherwise kill
-      if [[ -n "$TMUX" ]]; then
-        local window_count=$(tmux list-windows | wc -l)
+      if [[ -n "$TMUX" && -n "$gwt_window" ]]; then
+        local window_count=$(tmux list-windows -t "$gwt_session" | wc -l)
         if [[ $window_count -eq 1 ]]; then
           # Last window: navigate to parent and rename to shell name
           cd ..
           local shell_name=$(basename "${SHELL:-zsh}")
-          tmux rename-window "$shell_name"
+          tmux rename-window -t "$gwt_window" "$shell_name"
         else
           # Not last window: kill as usual
-          tmux kill-window
+          tmux kill-window -t "$gwt_window"
         fi
       fi
     else
@@ -436,13 +467,9 @@ EOF
       local start_idx=0
       [[ -n "${ZSH_VERSION:-}" ]] && start_idx=1
 
-      # Get current window name to defer killing it until the end
+      # Defer killing our own window until the end
       # (killing the current window terminates the shell running this script)
-      local current_window_name=""
-      local deferred_kill_window=""
-      if [[ -n "$TMUX" ]]; then
-        current_window_name="$(tmux display-message -p '#W')"
-      fi
+      local deferred_kill=0
 
       local idx=$start_idx
       local end_idx=$((start_idx + ${#worktree_paths[@]}))
@@ -498,24 +525,15 @@ EOF
           fi
         fi
 
-        # Close tmux window for this worktree (defer if it's the current window)
+        # Close tmux window for this worktree (defer if it's our own window)
         if [[ -n "$TMUX" ]]; then
-          if [[ "$window_name" == "$current_window_name" ]]; then
-            # Defer killing the current window until all other deletions are complete
-            deferred_kill_window="$window_name"
-          else
-            # Get the actual session name using tmux
-            local tmux_session="$(tmux display-message -p '#S')"
-
-            # Get window index by exact name match
-            local window_index="$(tmux list-windows -t "$tmux_session" -F "#{window_index} #W" 2>/dev/null |
-              awk -v name="$window_name" '{
-                  win_name = substr($0, index($0, " ") + 1);
-                  if (win_name == name) {print $1; exit}
-                }')"
-
-            if [[ -n "$window_index" ]]; then
-              tmux kill-window -t "$tmux_session:$window_index" 2>/dev/null || true
+          local target_window_id="$(_gwtmux_window_id_by_name "$gwt_session" "$window_name")"
+          if [[ -n "$target_window_id" ]]; then
+            if [[ "$target_window_id" == "$gwt_window" ]]; then
+              # Defer killing our own window until all other deletions are complete
+              deferred_kill=1
+            else
+              tmux kill-window -t "$target_window_id" 2>/dev/null || true
             fi
           fi
         fi
@@ -523,17 +541,16 @@ EOF
         idx=$((idx + 1))
       done
 
-      # Kill the current window last (if it was one of the worktrees we deleted)
-      if [[ -n "$deferred_kill_window" && -n "$TMUX" ]]; then
-        local tmux_session="$(tmux display-message -p '#S')"
-        local window_count="$(tmux list-windows -t "$tmux_session" | wc -l)"
+      # Kill our own window last (if it was one of the worktrees we deleted)
+      if [[ $deferred_kill -eq 1 && -n "$TMUX" && -n "$gwt_window" ]]; then
+        local window_count="$(tmux list-windows -t "$gwt_session" | wc -l)"
         if [[ $window_count -eq 1 ]]; then
           # Last window: navigate to parent and rename to shell name
           local shell_name=$(basename "${SHELL:-zsh}")
-          tmux rename-window "$shell_name"
+          tmux rename-window -t "$gwt_window" "$shell_name"
         else
           # Not last window: kill as usual
-          tmux kill-window
+          tmux kill-window -t "$gwt_window"
         fi
       fi
     fi
@@ -624,7 +641,7 @@ EOF
     fi
 
     # Update tmux window
-    tmux rename-window "$repo_name/$new_name"
+    tmux rename-window -t "$gwt_window" "$repo_name/$new_name"
     ;;
 
   normal)
@@ -640,9 +657,9 @@ EOF
     fi
 
     # Capture shell window to potentially reuse or kill (before any commands run)
-    local current_window="$(tmux display-message -p '#W')"
-    local current_window_id="$(tmux display-message -p '#{window_id}')"
-    local pane_count="$(tmux display-message -p '#{window_panes}')"
+    local current_window="$(_gwtmux_display '#W')"
+    local current_window_id="$gwt_window"
+    local pane_count="$(_gwtmux_display '#{window_panes}')"
     local shell_name=$(basename "${SHELL:-zsh}")
     local can_reuse_window=0
     if [[ "$current_window" == "$shell_name" && "$pane_count" == "1" ]]; then
@@ -671,8 +688,8 @@ EOF
           fi
           if [[ -n "$window_name" ]]; then
             # Check if window already exists
-            if ! tmux list-windows -F "#W" | grep -Fxq -- "$window_name"; then
-              tmux new-window -n "$window_name" -c "$worktree_path"
+            if [[ -z "$(_gwtmux_window_id_by_name "$gwt_session" "$window_name")" ]]; then
+              tmux new-window -t "$gwt_session" -n "$window_name" -c "$worktree_path"
             fi
           fi
         fi
@@ -738,7 +755,7 @@ EOF
     local success_count=0
 
     # Declare loop variables outside the loop to avoid re-declaration issues
-    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched pr_branch arg_parent arg_basename resolved_parent path_matched path_repo_name resolved_path path_git_common_dir path_git_root
+    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched pr_branch arg_parent arg_basename resolved_parent path_matched path_repo_name resolved_path path_git_common_dir path_git_root existing_window_id
 
     # Save original directory for resolving relative args after cd
     local orig_pwd="$PWD"
@@ -843,9 +860,11 @@ EOF
         window_name="$repo_name/$branch"
       fi
 
-      # If window already exists, just select it
-      if tmux list-windows -F "#W" | grep -Fxq -- "$window_name"; then
-        tmux select-window -t "$window_name"
+      # If window already exists, just select it (by id - name targets are
+      # prefix/fuzzy matched by tmux and can hit the wrong window)
+      existing_window_id="$(_gwtmux_window_id_by_name "$gwt_session" "$window_name")"
+      if [[ -n "$existing_window_id" ]]; then
+        tmux select-window -t "$existing_window_id"
         success_count=$((success_count + 1))
         continue
       fi
@@ -892,10 +911,10 @@ EOF
 
       # Create or reuse window
       if [[ $success_count -eq 0 && $can_reuse_window -eq 1 ]]; then
-        tmux rename-window "$window_name"
+        tmux rename-window -t "$gwt_window" "$window_name"
         reused_window_path="$worktree_path"
       else
-        tmux new-window -n "$window_name" -c "$worktree_path"
+        tmux new-window -t "$gwt_session" -n "$window_name" -c "$worktree_path"
       fi
 
       success_count=$((success_count + 1))
