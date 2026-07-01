@@ -755,7 +755,7 @@ EOF
     local success_count=0
 
     # Declare loop variables outside the loop to avoid re-declaration issues
-    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched pr_branch arg_parent arg_basename resolved_parent path_matched path_repo_name resolved_path path_git_common_dir path_git_root existing_window_id
+    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched pr_branch arg_parent arg_basename resolved_parent repo_parent_candidate path_matched path_repo_name resolved_path path_git_common_dir path_git_root existing_window_id
 
     # Save original directory for resolving relative args after cd
     local orig_pwd="$PWD"
@@ -804,13 +804,27 @@ EOF
         fi
       fi
 
-      # If not an existing path, check if parent dir is a repo parent (contains default/.git)
+      # If not an existing path, check if a leading path prefix is a repo parent
+      # (contains default/.git). Walk up from the immediate parent so the branch
+      # name may itself contain slashes, e.g. <repo>/demo/test-branch creates
+      # branch "demo/test-branch". The deepest matching ancestor wins.
       if [[ $path_matched -eq 0 && ( "$arg" == /* || "$arg" == .* || "$arg" == */* ) ]]; then
         arg_parent="$(dirname -- "$arg")"
         arg_basename="$(basename -- "$arg")"
-        if [[ -d "$arg_parent" ]]; then
-          resolved_parent="$(cd "$arg_parent" 2>/dev/null && pwd -P)"
-          if [[ -n "$resolved_parent" && -d "$resolved_parent/default" ]] && $git_cmd -C "$resolved_parent/default" rev-parse --git-dir &>/dev/null; then
+        resolved_parent=""
+        while [[ "$arg_parent" != "." && "$arg_parent" != "/" ]]; do
+          if [[ -d "$arg_parent" ]]; then
+            repo_parent_candidate="$(cd "$arg_parent" 2>/dev/null && pwd -P)"
+            if [[ -n "$repo_parent_candidate" && -d "$repo_parent_candidate/default" ]] && $git_cmd -C "$repo_parent_candidate/default" rev-parse --git-dir &>/dev/null; then
+              resolved_parent="$repo_parent_candidate"
+              break
+            fi
+          fi
+          # Not a repo parent: fold this component into the branch name and go up
+          arg_basename="$(basename -- "$arg_parent")/$arg_basename"
+          arg_parent="$(dirname -- "$arg_parent")"
+        done
+        if [[ -n "$resolved_parent" ]]; then
             # Override git context for this iteration
             git_root="$resolved_parent/default"
             has_git_root=1
@@ -837,7 +851,6 @@ EOF
             )"
             [[ -n "$pr_branch" ]] && branch="$pr_branch"
             repo_path_matched=1
-          fi
         fi
       fi
 

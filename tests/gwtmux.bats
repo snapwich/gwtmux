@@ -903,6 +903,30 @@ myrepo/existing"
   assert_output --partial "otherrepo/new-branch"
 }
 
+@test "gwtmux: creates worktree with slashes in branch via repo-parent path" {
+  setup_worktree_structure "myrepo"
+
+  # Create a non-git directory to run from
+  local OUTSIDE_DIR="$TEST_TEMP_DIR/not-a-repo"
+  mkdir -p "$OUTSIDE_DIR"
+
+  # Branch name itself contains a slash. The repo parent must be found by
+  # walking up past the branch components (myrepo is the repo parent, the
+  # branch is demo/test-branch).
+  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/demo/test-branch" Enter
+  confirm_branch_creation "$TEST_SESSION"
+  wait_for_dir_exists "$WORKTREE_PARENT/demo_test-branch"
+
+  # Directory uses underscores; branch keeps the slash
+  assert_dir_exists "$WORKTREE_PARENT/demo_test-branch"
+  run git -C "$WORKTREE_PARENT/demo_test-branch" branch --show-current
+  assert_output "demo/test-branch"
+
+  # Window name is repo/branch (slash preserved)
+  run get_tmux_windows
+  assert_output --partial "myrepo/demo/test-branch"
+}
+
 @test "gwtmux: creates worktree from repo-parent path outside any git repo" {
   setup_worktree_structure "myrepo"
 
