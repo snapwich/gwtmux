@@ -287,6 +287,41 @@ teardown() {
   assert_output --partial "myrepo/existing-branch"
 }
 
+@test "gwtmux: creates worktree as sibling of repo root when run from a subdirectory" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Nested subdirectory of the main repo
+  mkdir -p "$MAIN_REPO/src/deep"
+
+  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO/src/deep && gwtmux subdir-branch 2>&1" Enter
+  confirm_branch_creation "$TEST_SESSION"
+  wait_for_dir_exists "$WORKTREE_PARENT/subdir-branch"
+
+  # Sibling of the repo root, not nested inside the repo
+  assert_dir_exists "$WORKTREE_PARENT/subdir-branch"
+  refute [ -d "$MAIN_REPO/src/subdir-branch" ]
+  refute [ -d "$MAIN_REPO/subdir-branch" ]
+  run get_tmux_windows
+  assert_output --partial "myrepo/subdir-branch"
+}
+
+@test "gwtmux: creates worktree as sibling when run from a subdirectory of a worktree" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add -b first-branch "$WORKTREE_PARENT/first-branch" >/dev/null 2>&1
+  mkdir -p "$WORKTREE_PARENT/first-branch/src/deep"
+
+  tmux send-keys -t "$TEST_SESSION" "cd $WORKTREE_PARENT/first-branch/src/deep && gwtmux second-branch 2>&1" Enter
+  confirm_branch_creation "$TEST_SESSION"
+  wait_for_dir_exists "$WORKTREE_PARENT/second-branch"
+
+  assert_dir_exists "$WORKTREE_PARENT/second-branch"
+  refute [ -d "$WORKTREE_PARENT/first-branch/src/second-branch" ]
+  refute [ -d "$WORKTREE_PARENT/first-branch/second-branch" ]
+}
+
 @test "gwtmux: creates worktree from existing remote branch" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
@@ -1122,6 +1157,34 @@ myrepo/existing"
   refute_output --partial "myrepo/old-name"
 }
 
+@test "gwtmux --rename: works from a subdirectory of the worktree" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add -b old-name "$WORKTREE_PARENT/old-name" main >/dev/null 2>&1
+
+  cd "$WORKTREE_PARENT/old-name"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  mkdir -p src/deep
+  echo "test" >src/deep/test.txt
+  git add src/deep/test.txt
+  git commit -m "Test commit" >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/old-name" -c "$WORKTREE_PARENT/old-name" -P -F "#{window_id}")
+
+  # Invoked from a nested subdir - should still act on the worktree root
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/old-name/src/deep && gwtmux --rename new-name" Enter
+  wait_for_dir_exists "$WORKTREE_PARENT/new-name"
+
+  assert_dir_exists "$WORKTREE_PARENT/new-name"
+  refute [ -d "$WORKTREE_PARENT/old-name" ]
+  run git -C "$WORKTREE_PARENT/new-name" branch --show-current
+  assert_output "new-name"
+  run get_tmux_windows
+  assert_output --partial "myrepo/new-name"
+}
+
 @test "gwtmux --rename: renames with remote tracking branch" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
@@ -1224,6 +1287,16 @@ myrepo/existing"
 
 @test "gwtmux --rename: errors when in main repo (not worktree)" {
   cd "$MAIN_REPO"
+
+  run gwtmux --rename new-name
+  assert_failure
+  assert_output --partial "in main repo, not a worktree"
+}
+
+@test "gwtmux --rename: errors when in a subdirectory of main repo" {
+  cd "$MAIN_REPO"
+  mkdir -p "$MAIN_REPO/src/deep"
+  cd "$MAIN_REPO/src/deep"
 
   run gwtmux --rename new-name
   assert_failure
@@ -1348,6 +1421,24 @@ myrepo/existing"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
 
   # Both worktree and branch should be removed
+  refute [ -d "$WORKTREE_PARENT/test-wt" ]
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "test-branch"
+}
+
+@test "gwtmux -d: -wB works from a subdirectory of the worktree" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/test-wt" -b test-branch main >/dev/null 2>&1
+  mkdir -p "$WORKTREE_PARENT/test-wt/src/deep"
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
+
+  # Invoked from a nested subdir - should still remove the whole worktree
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt/src/deep && gwtmux -d -wB" Enter
+  wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
   run git -C "$MAIN_REPO" branch
   refute_output --partial "test-branch"
@@ -1596,6 +1687,16 @@ myrepo/existing"
 
 @test "gwtmux -d: errors when in main repo with destructive flags" {
   cd "$MAIN_REPO"
+
+  run gwtmux -d -w
+  assert_failure
+  assert_output --partial "in main repo, not a worktree"
+}
+
+@test "gwtmux -d: errors when in a subdirectory of main repo with destructive flags" {
+  cd "$MAIN_REPO"
+  mkdir -p "$MAIN_REPO/src/deep"
+  cd "$MAIN_REPO/src/deep"
 
   run gwtmux -d -w
   assert_failure

@@ -26,6 +26,19 @@ _gwtmux_window_id_by_name() {
     }'
 }
 
+# Resolve a git dir query (--git-dir or --git-common-dir) to an absolute,
+# normalized path. Git prints these relative to the working directory when run
+# inside the main repo (".git" at the top, "../../.git" two levels down), so
+# callers that apply dirname to the raw value walk *into* the repo instead of up
+# out of it, and callers that compare the two values see a false mismatch.
+# Args: <flag> [dir] (dir defaults to $PWD)
+_gwtmux_git_dir_path() {
+  local flag="$1" cwd="${2:-$PWD}" dir
+  dir="$(git -C "$cwd" rev-parse "$flag" 2>/dev/null)" || return 1
+  [[ -z "$dir" ]] && return 1
+  (cd "$cwd" && cd "$dir" && pwd -P) 2>/dev/null
+}
+
 # Dependency check helper
 _gwtmux_check_deps() {
   local missing=()
@@ -235,7 +248,7 @@ EOF
 
     # Find git root for all operations
     local git_common_dir
-    if ! git_common_dir="$(git rev-parse --git-common-dir 2>/dev/null)"; then
+    if ! git_common_dir="$(_gwtmux_git_dir_path --git-common-dir)"; then
       # Not in a git repo - but if worktree names were provided, try to find git root from them
       if [[ ${#worktree_names[@]} -gt 0 ]]; then
         # Try to find git common dir from the first specified worktree
@@ -245,20 +258,12 @@ EOF
         local first_dir_name="${first_wt_name//\//_}"
         local first_wt_path="$PWD/$first_dir_name"
         if [[ -d "$first_wt_path" ]]; then
-          git_common_dir="$(git -C "$first_wt_path" rev-parse --git-common-dir 2>/dev/null)"
-          if [[ -n "$git_common_dir" && "$git_common_dir" != /* ]]; then
-            git_common_dir="$first_wt_path/$git_common_dir"
-          fi
+          git_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$first_wt_path")"
         fi
       fi
       if [[ -z "$git_common_dir" ]]; then
         echo >&2 "Error: not in a git repository"
         return 1
-      fi
-    else
-      # Convert to absolute path
-      if [[ "$git_common_dir" != /* ]]; then
-        git_common_dir="$PWD/$git_common_dir"
       fi
     fi
 
@@ -270,11 +275,7 @@ EOF
 
       # Check if we're in a worktree only when doing destructive operations
       if [[ $delete_worktree -eq 1 || $delete_local -gt 0 ]]; then
-        local git_dir="$(git rev-parse --git-dir)"
-        # Convert to absolute path for comparison
-        if [[ "$git_dir" != /* ]]; then
-          git_dir="$PWD/$git_dir"
-        fi
+        local git_dir="$(_gwtmux_git_dir_path --git-dir)"
         if [[ "$git_dir" == "$git_common_dir" ]]; then
           echo >&2 "Error: in main repo, not a worktree. Refusing to delete."
           return 1
@@ -415,7 +416,7 @@ EOF
 
         # Check if we're trying to delete main repo
         if [[ $delete_worktree -eq 1 || $delete_local -gt 0 ]]; then
-          local wt_git_dir="$(git -C "$wt_path" rev-parse --git-dir 2>/dev/null)"
+          local wt_git_dir="$(_gwtmux_git_dir_path --git-dir "$wt_path")"
           if [[ "$wt_git_dir" == "$git_common_dir" ]]; then
             echo >&2 "Error: worktree '$wt_name' is the main repo. Refusing to delete."
             return 1
@@ -574,12 +575,12 @@ EOF
 
     local -r new_name="$1"
     local git_dir git_common_dir
-    if ! git_dir="$(git rev-parse --git-dir 2>/dev/null)"; then
+    if ! git_dir="$(_gwtmux_git_dir_path --git-dir)"; then
       echo >&2 "Error: not in a git repo"
       return 1
     fi
 
-    git_common_dir="$(git rev-parse --git-common-dir)"
+    git_common_dir="$(_gwtmux_git_dir_path --git-common-dir)"
     if [[ "$git_dir" == "$git_common_dir" ]]; then
       echo >&2 "Error: in main repo, not a worktree. Refusing to rename."
       return 1
@@ -706,15 +707,10 @@ EOF
     # Path arguments don't need git_root, so don't fail here.
     local git_common_dir git_root
     local has_git_root=0
-    if $git_cmd rev-parse --git-dir &>/dev/null; then
-      git_common_dir="$($git_cmd rev-parse --git-common-dir)"
-      if [[ "$git_common_dir" == .git ]]; then
-        git_root="$PWD"
-      elif [[ "$git_common_dir" == /* ]]; then
-        git_root="$(dirname -- "$git_common_dir")"
-      else
-        git_root="$PWD/$(dirname -- "$git_common_dir")"
-      fi
+    if git_common_dir="$(_gwtmux_git_dir_path --git-common-dir)"; then
+      # Root of the main repo, regardless of how deep in it (or in one of its
+      # worktrees) we were invoked. New worktrees are siblings of this root.
+      git_root="$(dirname -- "$git_common_dir")"
       has_git_root=1
     elif [[ -d "default" ]] && $git_cmd -C "$PWD/default" rev-parse --git-dir &>/dev/null; then
       git_root="$PWD/default"
@@ -783,18 +779,9 @@ EOF
             # It's a git directory - use directory name as branch label
             branch="$(basename "$resolved_path")"
             # Get repo name from this path's git structure
-            path_git_common_dir="$($git_cmd -C "$resolved_path" rev-parse --git-common-dir 2>/dev/null)"
+            path_git_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$resolved_path")"
             if [[ -n "$path_git_common_dir" ]]; then
-              if [[ "$path_git_common_dir" == /* ]]; then
-                # Absolute path (worktree case)
-                path_git_root="$(dirname "$path_git_common_dir")"
-              elif [[ "$path_git_common_dir" == ".git" ]]; then
-                # Main repo case - .git is in resolved_path
-                path_git_root="$resolved_path"
-              else
-                # Relative path to .git
-                path_git_root="$(cd "$resolved_path/$(dirname "$path_git_common_dir")" && pwd -P)"
-              fi
+              path_git_root="$(dirname -- "$path_git_common_dir")"
               path_repo_name="$(basename "$(dirname "$path_git_root")")"
             fi
             worktree_path="$resolved_path"
