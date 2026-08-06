@@ -1247,6 +1247,222 @@ myrepo/existing"
 }
 
 # ----------------------------------------------------------------------------
+# Unify semantics: converge dir, branch, and remote branch to one name
+# ----------------------------------------------------------------------------
+
+@test "gwtmux --rename: to current branch name renames dir only, keeps remote branch" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Dir name differs from branch name
+  git worktree add "$WORKTREE_PARENT/wrong-dir" -b feat-x main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/wrong-dir"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "test" >test.txt
+  git add test.txt
+  git commit -m "Test" >/dev/null 2>&1
+  git push -u origin feat-x >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/feat-x" -c "$WORKTREE_PARENT/wrong-dir" -P -F "#{window_id}")
+
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/wrong-dir && gwtmux --rename feat-x" Enter
+  wait_for_dir_exists "$WORKTREE_PARENT/feat-x"
+
+  assert_dir_exists "$WORKTREE_PARENT/feat-x"
+  refute [ -d "$WORKTREE_PARENT/wrong-dir" ]
+
+  # Remote branch must survive (regression: it used to be deleted)
+  run git -C "$REMOTE_REPO" branch
+  assert_output --partial "feat-x"
+
+  # Tracking intact
+  run git -C "$WORKTREE_PARENT/feat-x" rev-parse --abbrev-ref --symbolic-full-name @{u}
+  assert_output "origin/feat-x"
+}
+
+@test "gwtmux --rename: unifies mismatched dir, branch, and upstream names" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/somewhere" -b foo main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/somewhere"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "test" >test.txt
+  git add test.txt
+  git commit -m "Test" >/dev/null 2>&1
+  # Upstream branch name differs from local branch name
+  git push origin foo:bar >/dev/null 2>&1
+  git branch -u origin/bar >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/foo" -c "$WORKTREE_PARENT/somewhere" -P -F "#{window_id}")
+
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/somewhere && gwtmux --rename baz" Enter
+  wait_for_dir_exists "$WORKTREE_PARENT/baz"
+
+  run git -C "$WORKTREE_PARENT/baz" branch --show-current
+  assert_output "baz"
+
+  # Old upstream branch deleted, new one created
+  run git -C "$REMOTE_REPO" branch
+  assert_output --partial "baz"
+  refute_output --partial "bar"
+
+  run git -C "$WORKTREE_PARENT/baz" rev-parse --abbrev-ref --symbolic-full-name @{u}
+  assert_output "origin/baz"
+
+  run get_tmux_windows
+  assert_output --partial "myrepo/baz"
+}
+
+@test "gwtmux --rename: to upstream branch name renames local only, remote untouched" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/somewhere" -b foo main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/somewhere"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "test" >test.txt
+  git add test.txt
+  git commit -m "Test" >/dev/null 2>&1
+  git push origin foo:bar >/dev/null 2>&1
+  git branch -u origin/bar >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/foo" -c "$WORKTREE_PARENT/somewhere" -P -F "#{window_id}")
+
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/somewhere && gwtmux --rename bar" Enter
+  wait_for_dir_exists "$WORKTREE_PARENT/bar"
+
+  run git -C "$WORKTREE_PARENT/bar" branch --show-current
+  assert_output "bar"
+
+  # Remote branch kept as-is
+  run git -C "$REMOTE_REPO" branch
+  assert_output --partial "bar"
+
+  run git -C "$WORKTREE_PARENT/bar" rev-parse --abbrev-ref --symbolic-full-name @{u}
+  assert_output "origin/bar"
+}
+
+@test "gwtmux --rename: succeeds as no-op when everything already matches" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/baz" -b baz main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/baz"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "test" >test.txt
+  git add test.txt
+  git commit -m "Test" >/dev/null 2>&1
+  git push -u origin baz >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/baz" -c "$WORKTREE_PARENT/baz" -P -F "#{window_id}")
+
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/baz && gwtmux --rename baz 2>&1; echo EXIT_CODE:\$?" Enter
+  wait_until "tmux capture-pane -t '$new_window' -p | grep -qE 'EXIT_CODE:[0-9]'"
+
+  run tmux capture-pane -t "$new_window" -p
+  assert_output --partial "EXIT_CODE:0"
+
+  assert_dir_exists "$WORKTREE_PARENT/baz"
+  run git -C "$WORKTREE_PARENT/baz" branch --show-current
+  assert_output "baz"
+  run git -C "$REMOTE_REPO" branch
+  assert_output --partial "baz"
+  run git -C "$WORKTREE_PARENT/baz" rev-parse --abbrev-ref --symbolic-full-name @{u}
+  assert_output "origin/baz"
+}
+
+@test "gwtmux --rename: renames branch when dir already matches target" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/baz" -b old-branch main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/baz"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "test" >test.txt
+  git add test.txt
+  git commit -m "Test" >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/old-branch" -c "$WORKTREE_PARENT/baz" -P -F "#{window_id}")
+
+  # Must not fail with "already exists" - the target dir is this worktree
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/baz && gwtmux --rename baz 2>&1; echo EXIT_CODE:\$?" Enter
+  wait_until "tmux capture-pane -t '$new_window' -p | grep -qE 'EXIT_CODE:[0-9]'"
+
+  run tmux capture-pane -t "$new_window" -p
+  assert_output --partial "EXIT_CODE:0"
+  refute_output --partial "already exists"
+
+  run git -C "$WORKTREE_PARENT/baz" branch --show-current
+  assert_output "baz"
+  run get_tmux_windows
+  assert_output --partial "myrepo/baz"
+}
+
+@test "gwtmux --rename: warns and continues when old remote branch already deleted" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/foo" -b foo main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/foo"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "test" >test.txt
+  git add test.txt
+  git commit -m "Test" >/dev/null 2>&1
+  git push -u origin foo >/dev/null 2>&1
+
+  # Delete the branch on the remote out-of-band (stale tracking ref)
+  git -C "$REMOTE_REPO" branch -D foo >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/foo" -c "$WORKTREE_PARENT/foo" -P -F "#{window_id}")
+
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/foo && gwtmux --rename baz 2>&1; echo EXIT_CODE:\$?" Enter
+  wait_until "tmux capture-pane -t '$new_window' -p | grep -qE 'EXIT_CODE:[0-9]'"
+
+  run tmux capture-pane -t "$new_window" -p
+  assert_output --partial "Warning: could not delete"
+  assert_output --partial "EXIT_CODE:0"
+
+  # New remote branch pushed and tracked
+  run git -C "$REMOTE_REPO" branch
+  assert_output --partial "baz"
+  run git -C "$WORKTREE_PARENT/baz" rev-parse --abbrev-ref --symbolic-full-name @{u}
+  assert_output "origin/baz"
+}
+
+@test "gwtmux --rename: allows rename without remote delete when latest commit is not yours" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Worktree on a teammate's branch: latest commit authored by someone else,
+  # upstream already has the target name - only the dir needs fixing
+  git worktree add "$WORKTREE_PARENT/review-dir" -b feat-y main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT/review-dir"
+  git config user.name "Other User"
+  git config user.email "other@example.com"
+  echo "test" >test.txt
+  git add test.txt
+  git commit -m "Test" >/dev/null 2>&1
+  git push -u origin feat-y >/dev/null 2>&1
+  git config user.email "test@example.com"
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/feat-y" -c "$WORKTREE_PARENT/review-dir" -P -F "#{window_id}")
+
+  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/review-dir && gwtmux --rename feat-y" Enter
+  wait_for_dir_exists "$WORKTREE_PARENT/feat-y"
+
+  assert_dir_exists "$WORKTREE_PARENT/feat-y"
+  run git -C "$REMOTE_REPO" branch
+  assert_output --partial "feat-y"
+}
+
+# ----------------------------------------------------------------------------
 # Error cases and rollback
 # ----------------------------------------------------------------------------
 
@@ -1337,28 +1553,32 @@ myrepo/existing"
   assert_output --partial "already exists"
 }
 
-@test "gwtmux --rename: errors when commit author doesn't match current user" {
+@test "gwtmux --rename: errors when commit author doesn't match and remote delete is needed" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
   git worktree add -b test-wt "$WORKTREE_PARENT/test-wt" main >/dev/null 2>&1
   cd "$WORKTREE_PARENT/test-wt"
 
-  # Configure different user
+  # Latest commit authored by someone else, branch tracks origin/test-wt
   git config user.name "Other User"
   git config user.email "other@example.com"
-
-  # Make commit
   echo "test" >test.txt
   git add test.txt
   git commit -m "Test" >/dev/null 2>&1
+  git push -u origin test-wt >/dev/null 2>&1
 
-  # Change user back
   git config user.email "test@example.com"
 
+  # Renaming to a different name would delete origin/test-wt - refused
   run gwtmux --rename new-name
   assert_failure
   assert_output --partial "not authored by you"
+
+  # Nothing changed
+  assert_dir_exists "$WORKTREE_PARENT/test-wt"
+  run git -C "$REMOTE_REPO" branch
+  assert_output --partial "test-wt"
 }
 
 # ============================================================================

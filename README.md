@@ -90,16 +90,22 @@ gwtmux -dwB feature-1 feature-2
 ### Rename
 
 ```bash
-# Rename current worktree, branch, and tmux window
+# Set the worktree, branch, remote branch, and tmux window to one name
 gwtmux --rename new-branch-name
 ```
 
-This atomically:
+This command makes all names agree with the new name:
 
 1. Moves the worktree directory
 2. Renames the local branch
-3. Pushes the new branch and deletes the old remote branch (if tracking)
+3. If the configured upstream branch has a different name: pushes the new
+   branch, deletes the old remote branch, and sets the new upstream
 4. Renames the tmux window
+
+The command skips each step that already matches the new name. Thus you can
+use it to unify a worktree, branch, and remote branch that have different
+names. The command deletes the old remote branch only when the latest commit
+is authored by you.
 
 ## License
 

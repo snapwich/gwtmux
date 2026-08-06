@@ -146,10 +146,13 @@ DONE MODE (-d):
   If current window is last in session, renames to shell name instead of killing.
 
 RENAME MODE (--rename):
-  gwtmux --rename <name>   Rename worktree dir, branch, remote branch, and window
+  gwtmux --rename <name>   Unify worktree dir, branch, remote branch, and window to <name>
 
   Only works from within a worktree (not main repo).
-  Validates that latest commit is authored by you before renaming remote.
+  Steps that already match <name> are skipped, so it is safe to use when
+  the dir, branch, and remote branch names do not agree.
+  Remote branch is only touched via the configured upstream; deleting the
+  old remote branch requires the latest commit to be authored by you.
 
 EXAMPLES:
   gwtmux feature/auth      Create worktree for feature/auth branch
@@ -592,14 +595,6 @@ EOF
       return 1
     fi
 
-    # Check latest commit author matches current user to prevent renaming remote branch that is not yours
-    local commit_author="$(git log -1 --format='%ae')"
-    local current_user="$(git config user.email)"
-    if [[ "$commit_author" != "$current_user" ]]; then
-      echo >&2 "Error: latest commit not authored by you ($commit_author vs $current_user)"
-      return 1
-    fi
-
     local worktree_root="$(git rev-parse --show-toplevel)"
     local parent_dir="$(dirname "$worktree_root")"
     local repo_name="$(basename "$parent_dir")"
@@ -608,37 +603,65 @@ EOF
     local dir_new_name="${new_name//\//_}"
     local new_path="$parent_dir/$dir_new_name"
 
-    if [[ -e "$new_path" ]]; then
+    if [[ "$new_path" != "$worktree_root" && -e "$new_path" ]]; then
       echo >&2 "Error: $new_path already exists"
       return 1
     fi
 
-    # Check if has remote tracking
+    # Resolve the configured upstream. Remote "." is a local tracking branch,
+    # so no remote operations apply.
+    local upstream_remote="$(git config "branch.$current_branch.remote")"
+    local upstream_merge="$(git config "branch.$current_branch.merge")"
+    local upstream_branch="${upstream_merge#refs/heads/}"
     local has_remote=0
-    if git rev-parse --abbrev-ref --symbolic-full-name @{u} &>/dev/null; then
+    if [[ -n "$upstream_remote" && "$upstream_remote" != "." && -n "$upstream_branch" ]]; then
       has_remote=1
     fi
 
+    # Remote operations only happen when the upstream branch name differs
+    # from the target. Deleting the old remote branch is destructive, so
+    # require the latest commit to be yours before touching the remote.
+    local update_remote=0
+    if [[ $has_remote -eq 1 && "$upstream_branch" != "$new_name" ]]; then
+      update_remote=1
+      local commit_author="$(git log -1 --format='%ae')"
+      local current_user="$(git config user.email)"
+      if [[ "$commit_author" != "$current_user" ]]; then
+        echo >&2 "Error: latest commit not authored by you ($commit_author vs $current_user)"
+        return 1
+      fi
+    fi
+
     # Rename directory
-    git worktree move "$worktree_root" "$new_path" || return $?
+    local moved_dir=0
+    if [[ "$new_path" != "$worktree_root" ]]; then
+      git worktree move "$worktree_root" "$new_path" || return $?
+      moved_dir=1
+    fi
 
     # cd into new directory
     cd "$new_path" || return $?
 
     # Rename branch
-    git branch -m "$current_branch" "$new_name" || return $?
+    local renamed_branch=0
+    if [[ "$new_name" != "$current_branch" ]]; then
+      git branch -m "$current_branch" "$new_name" || return $?
+      renamed_branch=1
+    fi
 
-    # Update remote if exists
-    if [[ $has_remote -eq 1 ]]; then
-      if ! git push origin "$new_name"; then
+    if [[ $update_remote -eq 1 ]]; then
+      if ! git push "$upstream_remote" "$new_name"; then
         echo >&2 "Error: failed to push new branch. Reverting local changes..."
-        git branch -m "$new_name" "$current_branch"
-        git worktree move "$new_path" "$worktree_root"
-        cd "$worktree_root"
+        [[ $renamed_branch -eq 1 ]] && git branch -m "$new_name" "$current_branch"
+        if [[ $moved_dir -eq 1 ]]; then
+          git worktree move "$new_path" "$worktree_root"
+          cd "$worktree_root"
+        fi
         return 1
       fi
-      git push origin --delete "$current_branch" || return $?
-      git branch -u "origin/$new_name" || return $?
+      git push "$upstream_remote" --delete "$upstream_branch" ||
+        echo >&2 "Warning: could not delete $upstream_remote/$upstream_branch (may already be deleted)"
+      git branch -u "$upstream_remote/$new_name" || return $?
     fi
 
     # Update tmux window
