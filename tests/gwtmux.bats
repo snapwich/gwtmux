@@ -17,6 +17,9 @@ source "${BATS_TEST_DIRNAME}/../gwtmux.sh"
 # Default: 100 iterations = 10 seconds. Override via environment for CI.
 WAIT_TIMEOUT="${GWTMUX_TEST_TIMEOUT:-100}"
 
+# Real tmux, resolved before the stub dir shadows it on PATH.
+TMUX_BIN="$(command -v tmux)"
+
 # Generic wait helper - polls until condition succeeds or timeout
 # Usage: wait_until "condition command"
 # Returns: 0 if condition succeeded, 1 if timed out
@@ -252,6 +255,31 @@ GITCONFIG
 
   # Create a temporary bashrc that sources gwtmux - this ensures gwtmux is available
   # in all new tmux windows, not just the first one
+  # Run every test against its own private tmux SERVER, never the developer's.
+  #
+  # The suite calls bare "tmux", which by default talks to the server the
+  # developer is attached to: test sessions show up in their session list, and a
+  # gwtmux call whose target fails to resolve falls back to that server's current
+  # pane, so windows get created and killed in the developer's own session. Runs
+  # have leaked windows and sessions into a live session this way.
+  #
+  # TMUX_TMPDIR is NOT enough. A tmux client takes its socket from $TMUX when that
+  # is set, ignoring TMUX_TMPDIR - and $TMUX is set whenever the suite is run from
+  # inside tmux, which is the normal case for this project. So the socket is
+  # forced with an explicit "-S" through a stub on PATH, which cannot be
+  # overridden by inherited environment.
+  #
+  # The socket lives in a short directory of its own rather than under
+  # $BATS_TEST_TMPDIR: a unix socket path is capped near 104 bytes and the bats
+  # temp dir already spends ~75 of them.
+  TEST_TMUX_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gwtmux-tmux-XXXXXX")"
+  TEST_TMUX_SOCKET="$TEST_TMUX_DIR/s"
+  cat > "$STUB_DIR/tmux" <<EOF
+#!/bin/bash
+exec "$TMUX_BIN" -S "$TEST_TMUX_SOCKET" "\$@"
+EOF
+  chmod +x "$STUB_DIR/tmux"
+
   TEST_BASHRC="$TEST_TEMP_DIR/test_bashrc"
   cat > "$TEST_BASHRC" <<EOF
 source "${BATS_TEST_DIRNAME}/../gwtmux.sh"
@@ -259,6 +287,10 @@ export PATH="$STUB_DIR:\$PATH"
 export GIT_CONFIG_GLOBAL="$TEST_GITCONFIG"
 export GIT_CONFIG_SYSTEM=/dev/null
 EOF
+
+  # Put the stubs (including the socket-pinning tmux) on PATH before the first
+  # tmux call in this process.
+  export PATH="$STUB_DIR:$PATH"
 
   # Create detached tmux session with our custom shell init
   # Use bash -i to ensure it's interactive and reads our rc file
@@ -268,22 +300,29 @@ EOF
   # Configure new windows to also use our bashrc
   tmux set-option -t "$TEST_SESSION" default-command "bash --rcfile '$TEST_BASHRC' -i"
 
-  # Set TMUX variable so functions think we're in tmux (for direct calls in test process)
-  export TMUX="/tmp/tmux-$(id -u)/default,$TEST_SESSION,0"
-  export PATH="$STUB_DIR:$PATH"
+  # Set TMUX variable so functions think we're in tmux (for direct calls in test
+  # process). The first field must be the private server's socket, or these calls
+  # would reach the developer's default server instead.
+  export TMUX="$TEST_TMUX_SOCKET,$TEST_SESSION,0"
 
   # Setup git repos
   setup_git_repos
 }
 
 teardown() {
-  # Kill test tmux session if it exists
-  if tmux has-session -t "$TEST_SESSION" 2>/dev/null; then
-    tmux kill-session -t "$TEST_SESSION" 2>/dev/null || true
+  # Scoped to this test's own socket by the tmux stub. Never "kill-server":
+  # if the socket were ever unset or wrong, that would take down the developer's
+  # tmux server along with everything running in it.
+  tmux kill-session -t "$TEST_SESSION" 2>/dev/null || true
+
+  # The socket dir lives outside BATS_TEST_TMPDIR, so remove it explicitly.
+  if [[ -n "$TEST_TMUX_DIR" && "$TEST_TMUX_DIR" == */gwtmux-tmux-* ]]; then
+    rm -rf "$TEST_TMUX_DIR"
   fi
 
   # Stubs are automatically cleaned up when BATS_TEST_TMPDIR is removed
 }
+
 
 # ============================================================================
 # TESTS: gwtmux
