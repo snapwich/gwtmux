@@ -835,6 +835,30 @@ myrepo/existing"
   refute [ -d "$WORKTREE_PARENT/detached-wt" ]
 }
 
+@test "gwtmux -d: refuses a worktree whose window name is not unique" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Two detached worktrees, one window name ("myrepo/det")
+  local commit_hash=$(git rev-parse HEAD)
+  mkdir -p "$WORKTREE_PARENT/one" "$WORKTREE_PARENT/two"
+  git worktree add --detach "$WORKTREE_PARENT/one/det" "$commit_hash" >/dev/null 2>&1
+  git worktree add --detach "$WORKTREE_PARENT/two/det" "$commit_hash" >/dev/null 2>&1
+
+  # The open window belongs to one/det. Killing by name while deleting two/det
+  # would close the wrong worktree's window.
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/det" -c "$WORKTREE_PARENT/one/det" >/dev/null 2>&1
+
+  run gwtmux -dw ../two/det
+  assert_failure
+  assert_output --partial "is not unique"
+
+  # Refused in validation: nothing deleted, no window closed
+  assert_dir_exists "$WORKTREE_PARENT/two/det"
+  assert_dir_exists "$WORKTREE_PARENT/one/det"
+  assert tmux_window_exists "myrepo/det"
+}
+
 # ----------------------------------------------------------------------------
 # Multi-worktree mode (no arguments)
 # ----------------------------------------------------------------------------
@@ -3167,13 +3191,17 @@ myrepo/existing"
 # Window name collisions
 # ----------------------------------------------------------------------------
 
-@test "gwtmux: errors on a path whose worktree directory name is not unique" {
+@test "gwtmux: errors on a path whose computed window name is not unique" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
+  # Detached worktrees are named after their directory, so these two really do
+  # map to one window name ("myrepo/same"). Branch-named worktrees would not:
+  # see the test below.
+  local commit_hash=$(git rev-parse HEAD)
   mkdir -p "$WORKTREE_PARENT/one" "$WORKTREE_PARENT/two"
-  git worktree add "$WORKTREE_PARENT/one/same" -b same-one main >/dev/null 2>&1
-  git worktree add "$WORKTREE_PARENT/two/same" -b same-two main >/dev/null 2>&1
+  git worktree add --detach "$WORKTREE_PARENT/one/same" "$commit_hash" >/dev/null 2>&1
+  git worktree add --detach "$WORKTREE_PARENT/two/same" "$commit_hash" >/dev/null 2>&1
 
   local before_count="$(get_window_count)"
   run gwtmux "$WORKTREE_PARENT/two/same"
@@ -3182,6 +3210,22 @@ myrepo/existing"
   assert_output --partial "$WORKTREE_PARENT/one/same"
   assert_output --partial "$WORKTREE_PARENT/two/same"
   assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux: opens a path whose directory name repeats but whose window name does not" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Same directory basename, different branches: the window names are
+  # "myrepo/same-one" and "myrepo/same-two" and cannot collide
+  mkdir -p "$WORKTREE_PARENT/one" "$WORKTREE_PARENT/two"
+  git worktree add "$WORKTREE_PARENT/one/same" -b same-one main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/two/same" -b same-two main >/dev/null 2>&1
+
+  run gwtmux "$WORKTREE_PARENT/two/same"
+  assert_success
+  assert tmux_window_exists "myrepo/same-two"
+  refute tmux_window_exists "myrepo/same-one"
 }
 
 @test "gwtmux: opens a path when only another repo shares the directory name" {

@@ -218,28 +218,44 @@ _gwtmux_resolve_worktree() {
   printf '%s\n' "${candidates[@]}"
 }
 
-# Refuse a worktree whose directory basename another worktree of the same repo
-# already uses. Window names are built from that basename, so the two worktrees
-# map to one name and opening the second would silently select the first one's
-# window instead. Lazy like the resolver: only the worktree asked for is checked.
-# Args: <worktree_path>
-_gwtmux_check_unique_basename() {
-  local wt_path="$1" git_common_dir git_root wt_base other_path other_rest
+# Refuse a worktree whose computed window name another worktree of the same repo
+# already claims. Two worktrees on one name means the window opened or killed
+# for the second is really the first one's. What collides is the NAME, not the
+# directory basename: a convention worktree is named "<parent>/<branch>" and a
+# flat repo root just "<repo>", so two worktrees can share a directory basename
+# and still be provably distinct windows - refusing those was a false positive.
+# Lazy like the resolver: only the worktree asked for is checked.
+# Args: <worktree_path> [git_root] [window_name]
+#   git_root and window_name are resolved from <worktree_path> when omitted;
+#   pass them when the caller has already computed them.
+_gwtmux_check_unique_window_name() {
+  local wt_path="$1" git_root="${2:-}" window_name="${3:-}"
+  local git_common_dir resolved_path other_path other_branch
   local -a dupes=()
 
-  git_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$wt_path")" || return 0
-  git_root="$(dirname -- "$git_common_dir")"
-  wt_base="${wt_path##*/}"
+  if [[ -z "$git_root" ]]; then
+    git_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$wt_path")" || return 0
+    git_root="$(dirname -- "$git_common_dir")"
+  fi
+  [[ -z "$window_name" ]] && window_name="$(_gwtmux_window_name "$wt_path" "$git_root")"
+  [[ -z "$window_name" ]] && return 0
 
-  while IFS=$'\t' read -r other_path other_rest; do
-    [[ -z "$other_path" || "$other_path" == "$wt_path" ]] && continue
-    [[ "${other_path##*/}" == "$wt_base" ]] && dupes+=("$other_path")
+  # git lists worktrees physically; compare like for like or the worktree being
+  # checked counts as a duplicate of itself.
+  resolved_path="$(cd "$wt_path" 2>/dev/null && pwd -P)"
+  [[ -z "$resolved_path" ]] && resolved_path="$wt_path"
+
+  while IFS=$'\t' read -r other_path other_branch; do
+    [[ -z "$other_path" || "$other_path" == "$resolved_path" ]] && continue
+    if [[ "$(_gwtmux_window_name "$other_path" "$git_root" "$other_branch")" == "$window_name" ]]; then
+      dupes+=("$other_path")
+    fi
   done < <(_gwtmux_worktree_list "$git_root")
 
   [[ ${#dupes[@]} -eq 0 ]] && return 0
 
-  echo >&2 "Error: worktree directory '$wt_base' is not unique in '$git_root' - window names would collide:"
-  echo >&2 "  - $wt_path"
+  echo >&2 "Error: window name '$window_name' is not unique in '$git_root' - these worktrees collide:"
+  echo >&2 "  - $resolved_path"
   for other_path in "${dupes[@]}"; do
     echo >&2 "  - $other_path"
   done
@@ -772,12 +788,18 @@ EOF
           _gwtmux_check_clean_tree "$wt_path" || return 1
         fi
 
+        # Same name normal mode gave the window when it opened this worktree.
+        # The window to close is found by that name, so a second worktree
+        # mapping to it would have ITS window killed instead - refuse here, in
+        # phase 1, before anything destructive runs.
+        local wt_window_name="$(_gwtmux_window_name "$wt_path" "$git_root" "$wt_branch")"
+        _gwtmux_check_unique_window_name "$wt_path" "$git_root" "$wt_window_name" || return 1
+
         # Store validated data
         worktree_paths+=("$wt_path")
         branch_names+=("$wt_branch")
         switch_branches+=("$wt_switch_branch")
-        # Same name normal mode gave the window when it opened this worktree
-        window_names+=("$(_gwtmux_window_name "$wt_path" "$git_root" "$wt_branch")")
+        window_names+=("$wt_window_name")
       done
 
       # Check for nested worktrees across all parents
@@ -1302,10 +1324,12 @@ EOF
       # Name the window. A worktree that does not exist yet cannot be read, so
       # pass its repo root and branch along.
       if [[ $path_matched -eq 1 ]]; then
-        # A window name is only unique if the worktree's dir basename is, so
-        # check before a duplicate sends us to some other worktree's window.
-        _gwtmux_check_unique_basename "$worktree_path" || return 1
+        # Check the name before a worktree that shares it sends us to some
+        # other worktree's window. The repo is resolved from the path itself:
+        # $git_root here belongs to the current directory, which an explicit
+        # path argument need not be part of.
         window_name="$(_gwtmux_window_name "$worktree_path")"
+        _gwtmux_check_unique_window_name "$worktree_path" "" "$window_name" || return 1
       else
         window_name="$(_gwtmux_window_name "$worktree_path" "$git_root" "$branch")"
       fi
