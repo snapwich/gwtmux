@@ -4279,3 +4279,30 @@ setup_submodule() {
   assert tmux has-session -t "$TEST_SESSION"
 }
 
+# Normal mode resolved the repo from the cwd's --git-common-dir before it ever
+# considered "$PWD/default", so a branch argument typed in a convention parent
+# that sits inside another repo aimed at the ANCESTOR repo. Convention wins,
+# the same rule the no-arg dispatch follows.
+@test "gwtmux: branch arg from a convention parent under an ancestor repo uses the inner repo" {
+  setup_worktree_structure "myrepo"
+  setup_ancestor_repo
+
+  mkdir -p "$ANCESTOR_REPO/repos"
+  mv "$WORKTREE_PARENT" "$ANCESTOR_REPO/repos/myrepo"
+  WORKTREE_PARENT="$ANCESTOR_REPO/repos/myrepo"
+  MAIN_REPO="$WORKTREE_PARENT/default"
+
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux feature-x"
+  confirm_branch_creation "$TEST_SESSION"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+
+  # Created in the repo standing right here, not in the ancestor
+  assert_dir_exists "$WORKTREE_PARENT/feature-x"
+  refute [ -d "$ANCESTOR_REPO/feature-x" ]
+  assert tmux_window_exists "myrepo/feature-x"
+
+  run git -C "$ANCESTOR_REPO" branch
+  refute_output --partial "feature-x"
+}
+

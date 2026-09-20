@@ -1202,13 +1202,18 @@ EOF
     # Path arguments don't need git_root, so don't fail here.
     local git_common_dir git_root
     local has_git_root=0
-    if git_common_dir="$(_gwtmux_git_dir_path --git-common-dir)"; then
+    if _gwtmux_is_repo_root "$PWD/default"; then
+      # Convention wins, same rule the no-arg dispatch applies: a convention
+      # parent that happens to sit inside another git repo (a dotfiles repo at
+      # ~, a monorepo above ~/repos) used to resolve to the ANCESTOR repo, so
+      # "gwtmux <branch>" standing in the parent aimed at a repo the user never
+      # named instead of at the "default/" clone right here.
+      git_root="$PWD/default"
+      has_git_root=1
+    elif git_common_dir="$(_gwtmux_git_dir_path --git-common-dir)"; then
       # Root of the main repo, regardless of how deep in it (or in one of its
       # worktrees) we were invoked. New worktrees are siblings of this root.
       git_root="$(dirname -- "$git_common_dir")"
-      has_git_root=1
-    elif [[ -d "default" ]] && $git_cmd -C "$PWD/default" rev-parse --git-dir &>/dev/null; then
-      git_root="$PWD/default"
       has_git_root=1
     fi
 
