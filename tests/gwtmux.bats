@@ -4064,3 +4064,30 @@ EOF
   run git -C "$MAIN_REPO" branch -r
   assert_output --partial "origin/test-branch"
 }
+
+@test "gwtmux: no args opens worktrees when the parent is reached through a symlink" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feature-1 \
+    "$WORKTREE_PARENT/feature-1" main >/dev/null 2>&1
+
+  # Reaching the parent through a symlink keeps $PWD logical while git keeps
+  # reporting worktree paths physically.
+  ln -s "$WORKTREE_PARENT" "$TEST_TEMP_DIR/link"
+
+  # Deliberately not named after the shell: no-arg mode would kill it, and this
+  # test is about the windows it opens.
+  local new_window
+  new_window=$(tmux new-window -t "$TEST_SESSION" -n "probe" \
+    -c "$TEST_TEMP_DIR" -P -F "#{window_id}")
+
+  send_cmd "$new_window" "cd $TEST_TEMP_DIR/link && gwtmux"
+  wait_for_window_exists "myrepo/feature-1"
+  wait_cmd_done
+
+  run cat "$CMD_MARKER"
+  assert_output "0"
+
+  run get_tmux_windows
+  assert_output --partial "myrepo/default"
+  assert_output --partial "myrepo/feature-1"
+}

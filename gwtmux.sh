@@ -1114,9 +1114,15 @@ EOF
 
       $git_cmd -C "$PWD/default" fetch --prune --no-recurse-submodules --quiet
 
+      # git reports worktree paths physically ("/private/var/..."), while $PWD
+      # keeps whatever logical form the shell arrived by ("/var/...", a symlinked
+      # home). Comparing the two matched nothing under any symlinked ancestor:
+      # no window was opened, and the shell window was killed anyway.
+      local pwd_physical="$(pwd -P)"
+
       while IFS= read -r worktree_path; do
         # Only process worktrees in current directory
-        if [[ "$(dirname -- "$worktree_path")" == "$PWD" ]]; then
+        if [[ "$(dirname -- "$worktree_path")" == "$pwd_physical" ]]; then
           local window_name="$(_gwtmux_window_name "$worktree_path")"
           if [[ -n "$window_name" ]]; then
             # Check if window already exists
