@@ -880,6 +880,9 @@ EOF
       # Defer killing our own window until the end
       # (killing the current window terminates the shell running this script)
       local deferred_kill=0
+      # Set by any step that could not do what was asked. The invocation used to
+      # warn and still return 0, so a partial failure looked like success.
+      local had_failure=0
 
       local idx=$start_idx
       local end_idx=$((start_idx + ${#worktree_paths[@]}))
@@ -903,12 +906,23 @@ EOF
               return 1
             }
           fi
+          local removed=1
           git -C "$git_root" worktree remove "$wt_path" || {
-            echo >&2 "Warning: failed to remove worktree at '$wt_path'"
+            removed=0
+            echo >&2 "Error: failed to remove worktree at '$wt_path'"
           }
           # Return to original directory if it still exists (i.e., we didn't delete our own worktree)
           if [[ -d "$original_dir" ]]; then
             cd "$original_dir"
+          fi
+          # The worktree survived, so its branch is still checked out in it and
+          # its window still belongs to it. Deleting the branch or killing that
+          # window would destroy the view of a worktree that is still there -
+          # the single-target path aborts on this same failure.
+          if [[ $removed -eq 0 ]]; then
+            had_failure=1
+            idx=$((idx + 1))
+            continue
           fi
         fi
 
@@ -928,12 +942,14 @@ EOF
             # Safe delete (already validated above)
             git -C "$git_root" branch -d "$branch" || {
               local_deleted=0
+              had_failure=1
               echo >&2 "Warning: failed to delete branch '$branch'"
             }
           else
             # Force delete
             git -C "$git_root" branch -D "$branch" || {
               local_deleted=0
+              had_failure=1
               echo >&2 "Warning: failed to force delete branch '$branch'"
             }
           fi
@@ -978,6 +994,14 @@ EOF
           # Not last window: kill as usual
           tmux kill-window -t "$gwt_window"
         fi
+      fi
+
+      # Report the failure the warnings above described. Returning 0 here made
+      # a half-done cleanup indistinguishable from a complete one. An "if", not
+      # a "[[ ... ]] && return 1": this is the last command of the branch, so
+      # the false test would become the exit status of gwtmux itself.
+      if [[ $had_failure -eq 1 ]]; then
+        return 1
       fi
     fi
     ;;

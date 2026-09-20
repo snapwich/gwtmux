@@ -3136,6 +3136,33 @@ myrepo/existing"
   assert_output --partial "child-a"
 }
 
+
+@test "gwtmux -d: multi-target keeps window and branch when the worktree removal fails" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/feat" -b feat main >/dev/null 2>&1
+  # An uncommitted change makes "git worktree remove" refuse without --force
+  echo "dirty" >>"$WORKTREE_PARENT/feat/README.md"
+
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/feat" -c "$WORKTREE_PARENT/feat" >/dev/null 2>&1
+  local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$WORKTREE_PARENT" -P -F "#{window_id}")
+
+  send_cmd "$runner" "cd $WORKTREE_PARENT && gwtmux -dwb feat"
+  wait_cmd_done
+
+  # The failure has to reach the exit status: warning-and-continue used to
+  # report 0, so a cleanup that removed nothing looked complete.
+  assert_equal "$(cat "$CMD_MARKER")" "1"
+
+  # The worktree survived, so its window and its branch must survive with it
+  assert_dir_exists "$WORKTREE_PARENT/feat"
+  assert tmux_window_exists "myrepo/feat"
+  run git -C "$MAIN_REPO" branch
+  assert_output --partial "feat"
+  run git -C "$MAIN_REPO" worktree list
+  assert_output --partial "$WORKTREE_PARENT/feat"
+}
 # ----------------------------------------------------------------------------
 # Done mode: worktree name resolution
 # ----------------------------------------------------------------------------
