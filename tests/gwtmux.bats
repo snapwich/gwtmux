@@ -4038,3 +4038,29 @@ EOF
   run git -C "$MAIN_REPO" branch
   refute_output --partial "test-branch"
 }
+
+@test "gwtmux -d: -dbr keeps the remote branch when the local delete fails" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/test-wt" -b test-branch main >/dev/null 2>&1
+  git -C "$WORKTREE_PARENT/test-wt" config user.name "Test User"
+  git -C "$WORKTREE_PARENT/test-wt" config user.email "test@example.com"
+  echo "test" >"$WORKTREE_PARENT/test-wt/test.txt"
+  git -C "$WORKTREE_PARENT/test-wt" add test.txt
+  git -C "$WORKTREE_PARENT/test-wt" commit -m "Test" >/dev/null 2>&1
+  git -C "$WORKTREE_PARENT/test-wt" push -u origin test-branch >/dev/null 2>&1
+  git -C "$MAIN_REPO" merge test-branch >/dev/null 2>&1
+
+  # No -w, so the worktree stays and git refuses to delete the branch it has
+  # checked out. The remote copy is then the only one left: it must survive.
+  run gwtmux -dbr test-branch
+  assert_output --partial "failed to delete branch 'test-branch'"
+
+  run git -C "$MAIN_REPO" branch
+  assert_output --partial "test-branch"
+  run git -C "$REMOTE_REPO" branch
+  assert_output --partial "test-branch"
+  run git -C "$MAIN_REPO" branch -r
+  assert_output --partial "origin/test-branch"
+}

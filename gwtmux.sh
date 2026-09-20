@@ -884,20 +884,26 @@ EOF
             }
           fi
 
+          local local_deleted=1
           if [[ $delete_local -eq 1 ]]; then
             # Safe delete (already validated above)
             git -C "$git_root" branch -d "$branch" || {
+              local_deleted=0
               echo >&2 "Warning: failed to delete branch '$branch'"
             }
           else
             # Force delete
             git -C "$git_root" branch -D "$branch" || {
+              local_deleted=0
               echo >&2 "Warning: failed to force delete branch '$branch'"
             }
           fi
 
-          # Delete remote branch if requested
-          if [[ $delete_remote -eq 1 ]]; then
+          # Delete remote branch if requested. Only after the local delete
+          # actually succeeded: the branch still exists here, so dropping the
+          # remote would leave nothing to restore it from. The single-target
+          # path above already aborts on the same failure.
+          if [[ $delete_remote -eq 1 && $local_deleted -eq 1 ]]; then
             if git -C "$git_root" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
               git -C "$git_root" push origin --delete "$branch" || {
                 echo >&2 "Warning: failed to delete remote branch 'origin/$branch'"
