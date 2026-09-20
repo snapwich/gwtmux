@@ -771,6 +771,57 @@ myrepo/existing"
   assert_equal "$(get_window_count)" "$before_count"
 }
 
+# D15: a path-shaped arg that resolves to no worktree must fail in place. It
+# used to fall through to branch handling, which folded the whole path into a
+# branch name and created a branch plus a worktree for it. Driven through tmux,
+# not "run": on a regression gwtmux asks "Create new branch ...?" on /dev/tty,
+# which would hang the test instead of failing it.
+@test "gwtmux: errors on an absolute path outside any worktree" {
+  setup_worktree_structure "myrepo"
+  mkdir -p "$TEST_TEMP_DIR/plain/empty"
+
+  local before_list="$(git -C "$MAIN_REPO" worktree list --porcelain)"
+  local before_count="$(get_window_count)"
+
+  # Errors go to a file, not the pane: a pane wraps long paths at its width, so
+  # a captured path never matches as one substring.
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux $TEST_TEMP_DIR/plain/empty 2>$TEST_TEMP_DIR/err"
+  wait_cmd_done
+
+  assert_not_equal "$(cat "$CMD_MARKER")" "0"
+  run cat "$TEST_TEMP_DIR/err"
+  assert_output --partial "Error: '$TEST_TEMP_DIR/plain/empty' is not a worktree root"
+  run tmux capture-pane -t "$CMD_TARGET" -p
+  refute_output --partial "Create new branch"
+
+  # Nothing created: no branch named after the path, no worktree, no window
+  assert_equal "$(git -C "$MAIN_REPO" worktree list --porcelain)" "$before_list"
+  run git -C "$MAIN_REPO" branch --format='%(refname:short)'
+  refute_output --partial "empty"
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux: errors on a relative path that does not exist" {
+  setup_worktree_structure "myrepo"
+
+  local before_list="$(git -C "$MAIN_REPO" worktree list --porcelain)"
+  local before_count="$(get_window_count)"
+
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux ./nope 2>$TEST_TEMP_DIR/err"
+  wait_cmd_done
+
+  assert_not_equal "$(cat "$CMD_MARKER")" "0"
+  run cat "$TEST_TEMP_DIR/err"
+  assert_output --partial "Error: './nope' is not a worktree root"
+  run tmux capture-pane -t "$CMD_TARGET" -p
+  refute_output --partial "Create new branch"
+
+  assert_equal "$(git -C "$MAIN_REPO" worktree list --porcelain)" "$before_list"
+  run git -C "$MAIN_REPO" branch --format='%(refname:short)'
+  refute_output --partial "nope"
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
 # ----------------------------------------------------------------------------
 # Window naming: detached HEAD
 # ----------------------------------------------------------------------------

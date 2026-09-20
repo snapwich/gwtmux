@@ -1291,6 +1291,16 @@ EOF
         fi
       fi
 
+      # An explicitly path-shaped arg that reached this point names neither a
+      # worktree root nor a repo parent, so there is nothing to open and nowhere
+      # to create anything. Fail here: the branch handling below would otherwise
+      # fold the whole path into a branch name and create that branch, plus a
+      # worktree for it, in whatever repo the current directory belongs to.
+      if [[ $path_matched -eq 0 && $repo_path_matched -eq 0 && $arg_is_path_shaped -eq 1 ]]; then
+        echo >&2 "Error: '$arg' is not a worktree root"
+        return 1
+      fi
+
       # If not a path, resolve branch name (try gh pr first, fall back to arg)
       if [[ $path_matched -eq 0 && $repo_path_matched -eq 0 ]]; then
         if [[ $has_git_root -eq 0 ]]; then
