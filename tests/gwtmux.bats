@@ -3199,6 +3199,52 @@ myrepo/existing"
   run git -C "$REMOTE_REPO" branch
   assert_output --partial "nested"
 }
+
+@test "gwtmux -dwbr: keeps a nested worktree's remote branch when the local delete fails" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/parent-wt" -b parent-wt main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/parent-wt/nested" -b nested main >/dev/null 2>&1
+
+  # A commit pushed to origin/nested, then the remote-tracking ref rolled back
+  # so the branch is AHEAD of its upstream. It is merged into main (main is
+  # advanced to it below), so the -b merge check passes, while "git branch -d"
+  # refuses: the main repo's HEAD does not contain it either.
+  cd "$WORKTREE_PARENT/parent-wt/nested"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "work" >work.txt
+  git add work.txt
+  git commit -m "nested work" >/dev/null 2>&1
+  git push -q -u origin nested >/dev/null 2>&1
+  local nested_head="$(git rev-parse HEAD)"
+  git update-ref refs/remotes/origin/nested "$(git rev-parse HEAD~1)"
+
+  cd "$MAIN_REPO"
+  # main contains the nested commit, so it counts as merged...
+  git merge --ff-only "$nested_head" >/dev/null 2>&1
+  # ...but the main repo sits on a branch that does not contain it, so
+  # "git branch -d" has neither HEAD nor upstream to justify the delete.
+  git checkout -q -b sidetrack main~1 >/dev/null 2>&1
+
+  local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$WORKTREE_PARENT" -P -F "#{window_id}")
+  send_cmd "$runner" "cd $WORKTREE_PARENT && gwtmux -dwbr parent-wt"
+  confirm_nested_worktree_removal "$runner"
+  wait_cmd_done
+
+  # A cleanup that could not delete the branch is not a success
+  assert_equal "$(cat "$CMD_MARKER")" "1"
+  run tmux capture-pane -t "$runner" -p
+  assert_output --partial "failed to delete branch 'nested'"
+
+  # The local branch is still here, so the remote copy is the only thing that
+  # could restore it - it must not be deleted
+  run git -C "$MAIN_REPO" branch
+  assert_output --partial "nested"
+  run git -C "$REMOTE_REPO" branch
+  assert_output --partial "nested"
+}
 # ----------------------------------------------------------------------------
 # Done mode: worktree name resolution
 # ----------------------------------------------------------------------------

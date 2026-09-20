@@ -414,12 +414,16 @@ _gwtmux_find_nested_worktrees() {
 }
 
 # Remove nested worktrees and optionally their branches
+#
+# Sets _gwtmux_nested_failure to 1 when a branch delete failed, so the caller
+# can report a partial cleanup instead of exiting 0.
 # Args: git_root delete_local delete_remote nested_paths...
 _gwtmux_remove_nested_worktrees() {
   local git_root="$1"
   local delete_local="$2"
   local delete_remote="$3"
   shift 3
+  _gwtmux_nested_failure=0
 
   local nwt_path nwt_branch force_flag
   for nwt_path in "$@"; do
@@ -433,12 +437,26 @@ _gwtmux_remove_nested_worktrees() {
     }
 
     if [[ -n "$nwt_branch" && $delete_local -gt 0 ]]; then
+      # The failure used to be swallowed by "2>/dev/null || true", so the user
+      # was never told that a branch they asked to delete is still there.
+      local nwt_local_deleted=1
       if [[ $delete_local -eq 1 ]]; then
-        git -C "$git_root" branch -d "$nwt_branch" 2>/dev/null || true
+        git -C "$git_root" branch -d "$nwt_branch" || {
+          nwt_local_deleted=0
+          echo >&2 "Warning: failed to delete branch '$nwt_branch' of nested worktree '$nwt_path'"
+        }
       else
-        git -C "$git_root" branch -D "$nwt_branch" 2>/dev/null || true
+        git -C "$git_root" branch -D "$nwt_branch" || {
+          nwt_local_deleted=0
+          echo >&2 "Warning: failed to force delete branch '$nwt_branch' of nested worktree '$nwt_path'"
+        }
       fi
-      if [[ $delete_remote -eq 1 ]]; then
+      [[ $nwt_local_deleted -eq 0 ]] && _gwtmux_nested_failure=1
+
+      # Only after the local delete actually succeeded, for the reason the
+      # multi-target loop states: the branch still exists here, so dropping the
+      # remote would leave nothing to restore it from.
+      if [[ $delete_remote -eq 1 && $nwt_local_deleted -eq 1 ]]; then
         if git -C "$git_root" show-ref --verify --quiet "refs/remotes/origin/$nwt_branch"; then
           git -C "$git_root" push origin --delete "$nwt_branch" 2>/dev/null || true
         fi
@@ -665,6 +683,10 @@ EOF
       fi
     fi
 
+    # Cleared per invocation: _gwtmux_remove_nested_worktrees raises it, and the
+    # exit status at the end of both paths reads it.
+    _gwtmux_nested_failure=0
+
     # Nothing in done mode can be trusted inside a submodule: the resolver would
     # aim at the superproject. Refuse before any validation or deletion runs.
     _gwtmux_refuse_submodule "$done_probe_dir" || return 1
@@ -797,6 +819,14 @@ EOF
           # Not last window: kill as usual
           tmux kill-window -t "$gwt_window"
         fi
+      fi
+
+      # A nested branch that could not be deleted is a partial cleanup, not a
+      # success - the same rule the multi-target path applies. An "if", not a
+      # "[[ ... ]] && return 1": this is the last command of the branch, so the
+      # false test would become the exit status of gwtmux itself.
+      if [[ ${_gwtmux_nested_failure:-0} -eq 1 ]]; then
+        return 1
       fi
     else
       # Multi-worktree mode: two-phase validation
@@ -943,6 +973,7 @@ EOF
               cd "$original_dir" 2>/dev/null || true
               return 1
             }
+            [[ ${_gwtmux_nested_failure:-0} -eq 1 ]] && had_failure=1
           fi
           local removed=1
           git -C "$git_root" worktree remove "$wt_path" || {
