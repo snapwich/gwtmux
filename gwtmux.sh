@@ -314,6 +314,21 @@ _gwtmux_check_clean_tree() {
   return 1
 }
 
+# Refuse to act inside a submodule. gwtmux derives the repo root as the parent
+# of --git-common-dir, which for a submodule is "<super>/.git/modules" — not a
+# repo root at all. Git resolves that path back to the SUPERPROJECT, so every
+# lookup keyed on it (the -d name resolver above all) silently targets the
+# superproject's worktrees and branches instead of anything the user can see.
+# Submodules were never part of the design, so refuse rather than guess.
+# Args: [dir] (defaults to $PWD)
+_gwtmux_refuse_submodule() {
+  local dir="${1:-$PWD}" super
+  super="$(git -C "$dir" rev-parse --show-superproject-working-tree 2>/dev/null)" || return 0
+  [[ -z "$super" ]] && return 0
+  echo >&2 "Error: '$dir' is inside a submodule of '$super' — gwtmux does not support submodules."
+  return 1
+}
+
 # Find worktrees nested under a given worktree path
 # Sets caller's _nested_worktrees array
 _gwtmux_find_nested_worktrees() {
@@ -548,6 +563,9 @@ EOF
 
     # Find git root for all operations
     local git_common_dir
+    # The directory whose repo every later lookup keys on; the submodule guard
+    # below checks this one, not always $PWD.
+    local done_probe_dir="$PWD"
     if ! git_common_dir="$(_gwtmux_git_dir_path --git-common-dir)"; then
       # Not in a git repo - but if worktree names were provided, try to find git root from them
       if [[ ${#worktree_names[@]} -gt 0 ]]; then
@@ -569,6 +587,7 @@ EOF
         esac
         if [[ -d "$first_wt_path" ]]; then
           git_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$first_wt_path")"
+          done_probe_dir="$first_wt_path"
         fi
       fi
       if [[ -z "$git_common_dir" ]]; then
@@ -576,6 +595,10 @@ EOF
         return 1
       fi
     fi
+
+    # Nothing in done mode can be trusted inside a submodule: the resolver would
+    # aim at the superproject. Refuse before any validation or deletion runs.
+    _gwtmux_refuse_submodule "$done_probe_dir" || return 1
 
     # If no worktree names provided, use current worktree (backward compatibility)
     if [[ ${#worktree_names[@]} -eq 0 ]]; then

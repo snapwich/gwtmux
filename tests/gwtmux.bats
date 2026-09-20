@@ -4091,3 +4091,69 @@ EOF
   assert_output --partial "myrepo/default"
   assert_output --partial "myrepo/feature-1"
 }
+
+# Set up a submodule inside the convention repo's default/ worktree. Needs
+# "protocol.file.allow": git refuses a file:// submodule by default.
+# Sets SUBMODULE_DIR.
+setup_submodule() {
+  SUB_REMOTE="$TEST_TEMP_DIR/sub-remote.git"
+  git init --bare "$SUB_REMOTE" >/dev/null 2>&1
+  git -C "$SUB_REMOTE" symbolic-ref HEAD refs/heads/main
+
+  local seed="$TEST_TEMP_DIR/sub-seed"
+  git clone "$SUB_REMOTE" "$seed" >/dev/null 2>&1
+  git -C "$seed" checkout -b main >/dev/null 2>&1
+  echo "sub" >"$seed/sub.txt"
+  git -C "$seed" add sub.txt
+  git -C "$seed" commit -m "Sub initial" >/dev/null 2>&1
+  git -C "$seed" push -u origin main >/dev/null 2>&1
+
+  git -C "$MAIN_REPO" -c protocol.file.allow=always \
+    submodule add -q "$SUB_REMOTE" sub >/dev/null 2>&1
+  git -C "$MAIN_REPO" commit -m "Add submodule" >/dev/null 2>&1
+  SUBMODULE_DIR="$MAIN_REPO/sub"
+}
+
+# A submodule's --git-common-dir is "<super>/.git/modules/<name>", so gwtmux's
+# "git root = dirname(--git-common-dir)" lands on "<super>/.git/modules" - a
+# path git resolves back to the SUPERPROJECT. Every done-mode lookup keyed on it
+# therefore aims at the superproject: the -d name resolver listed the
+# superproject's worktrees, so this invocation removed "$WORKTREE_PARENT/feature-1"
+# and deleted its branch while the user was standing in the submodule. Submodules
+# were never part of the design, so done mode refuses inside one.
+@test "gwtmux -d: refuses inside a submodule instead of hitting the superproject" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feature-1 \
+    "$WORKTREE_PARENT/feature-1" main >/dev/null 2>&1
+  setup_submodule
+  cd "$SUBMODULE_DIR"
+
+  local before_count="$(get_window_count)"
+  run gwtmux -d -wB feature-1
+  assert_failure
+  assert_output --partial "is inside a submodule"
+  assert_output --partial "$MAIN_REPO"
+
+  # The superproject's worktree and branch are both untouched
+  assert_dir_exists "$WORKTREE_PARENT/feature-1"
+  run git -C "$MAIN_REPO" branch
+  assert_output --partial "feature-1"
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+# Same guard on the no-name path: there the branch delete runs against the
+# submodule but the primary branch to switch to is read from the superproject,
+# so the two halves of the operation disagree about which repo they are in.
+@test "gwtmux -d: refuses a bare -dB inside a submodule" {
+  setup_worktree_structure "myrepo"
+  setup_submodule
+  cd "$SUBMODULE_DIR"
+  git checkout -b sub-feature >/dev/null 2>&1
+
+  run gwtmux -d -B
+  assert_failure
+  assert_output --partial "is inside a submodule"
+
+  run git -C "$SUBMODULE_DIR" branch --show-current
+  assert_output "sub-feature"
+}
