@@ -3163,6 +3163,42 @@ myrepo/existing"
   run git -C "$MAIN_REPO" worktree list
   assert_output --partial "$WORKTREE_PARENT/feat"
 }
+
+@test "gwtmux -dwbr: refuses when a nested worktree's branch is not merged" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/parent-wt" -b parent-wt main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/parent-wt/nested" -b nested main >/dev/null 2>&1
+
+  cd "$WORKTREE_PARENT/parent-wt/nested"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "work" >work.txt
+  git add work.txt
+  git commit -m "unmerged work" >/dev/null 2>&1
+  # Pushed, so "git branch -d" would accept it: merged into its upstream while
+  # provably unmerged into main.
+  git push -q -u origin nested >/dev/null 2>&1
+  cd "$MAIN_REPO"
+
+  local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$WORKTREE_PARENT" -P -F "#{window_id}")
+  send_cmd "$runner" "cd $WORKTREE_PARENT && gwtmux -dwbr parent-wt >$TEST_TEMP_DIR/out 2>&1"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "1"
+
+  run cat "$TEST_TEMP_DIR/out"
+  assert_output --partial "nested worktree"
+  assert_output --partial "is not merged into 'main'"
+
+  # Nothing deleted anywhere: the refusal comes before the prompt
+  assert_dir_exists "$WORKTREE_PARENT/parent-wt/nested"
+  assert_dir_exists "$WORKTREE_PARENT/parent-wt"
+  run git -C "$MAIN_REPO" branch
+  assert_output --partial "nested"
+  run git -C "$REMOTE_REPO" branch
+  assert_output --partial "nested"
+}
 # ----------------------------------------------------------------------------
 # Done mode: worktree name resolution
 # ----------------------------------------------------------------------------

@@ -345,6 +345,59 @@ _gwtmux_refuse_submodule() {
   return 1
 }
 
+# The branch "-b" measures "merged" against: origin/HEAD, else origin/main,
+# else origin/master, else the literal name "main" even when no such branch
+# exists (a repo with neither is tolerated rather than refused).
+# Args: [git_root] (defaults to $PWD)
+_gwtmux_default_branch() {
+  local root="${1:-$PWD}" db
+  db="$(git -C "$root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+  if [[ -z "$db" ]]; then
+    if git -C "$root" show-ref --verify --quiet refs/remotes/origin/main; then
+      db="main"
+    elif git -C "$root" show-ref --verify --quiet refs/remotes/origin/master; then
+      db="master"
+    else
+      db="main"
+    fi
+  fi
+  printf '%s\n' "$db"
+}
+
+# Is <branch> merged into <into>?
+#
+# --format, not the default listing: git marks a branch checked out in ANOTHER
+# worktree with "+", which "^[* ]" never matched, and an interpolated branch
+# name is a regex there ("-Fxq" takes it literally).
+# Args: git_root branch into
+_gwtmux_branch_merged() {
+  git -C "$1" branch --merged "$3" --format='%(refname:short)' | grep -Fxq -- "$2"
+}
+
+# Apply "-b" 's "must be merged" rule to the branches of NESTED worktrees.
+#
+# Nested branches are deleted with "git branch -d", whose own criterion is
+# "merged into its upstream, or into HEAD" - so a feature branch that has been
+# pushed passes it while being unmerged into the default branch, which is what
+# "-b" actually promises. Without this check "-dwbr" deleted such a branch
+# locally AND on the remote. Only "-b" is checked; "-B" forces by definition.
+# Args: git_root delete_local default_branch nested_paths...
+_gwtmux_check_nested_branches_merged() {
+  local git_root="$1" delete_local="$2" default_branch="$3"
+  shift 3
+  [[ $delete_local -eq 1 ]] || return 0
+
+  local nwt_path nwt_branch
+  for nwt_path in "$@"; do
+    nwt_branch="$(git -C "$nwt_path" branch --show-current 2>/dev/null)"
+    [[ -n "$nwt_branch" ]] || continue
+    if ! _gwtmux_branch_merged "$git_root" "$nwt_branch" "$default_branch"; then
+      echo >&2 "Error: branch '$nwt_branch' (nested worktree '$nwt_path') is not merged into '$default_branch'. Use -B to force delete."
+      return 1
+    fi
+  done
+}
+
 # Find worktrees nested under a given worktree path
 # Sets caller's _nested_worktrees array
 _gwtmux_find_nested_worktrees() {
@@ -646,24 +699,13 @@ EOF
       fi
 
       # Pre-flight checks: validate branch deletion before making any destructive changes
+      local default_branch=""
+      if [[ $delete_local -eq 1 ]]; then
+        default_branch="$(_gwtmux_default_branch "$(dirname "$git_common_dir")")"
+      fi
       if [[ -n "$branch" && $delete_local -eq 1 ]]; then
         # Safe delete - check if merged BEFORE removing worktree
-        local default_branch="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
-        if [[ -z "$default_branch" ]]; then
-          if git show-ref --verify --quiet refs/remotes/origin/main; then
-            default_branch="main"
-          elif git show-ref --verify --quiet refs/remotes/origin/master; then
-            default_branch="master"
-          else
-            default_branch="main" # ultimate fallback
-          fi
-        fi
-
-        # --format, not the default listing: git marks a branch checked out in
-        # ANOTHER worktree with "+", which "^[* ]" never matched, and an
-        # interpolated branch name is a regex there ("-Fxq" takes it literally).
-        if ! git branch --merged "$default_branch" --format='%(refname:short)' |
-          grep -Fxq -- "$branch"; then
+        if ! _gwtmux_branch_merged "$(dirname "$git_common_dir")" "$branch" "$default_branch"; then
           echo >&2 "Error: branch '$branch' is not merged into '$default_branch'. Use -B to force delete."
           return 1
         fi
@@ -679,6 +721,10 @@ EOF
       if [[ $delete_worktree -eq 1 ]]; then
         _gwtmux_find_nested_worktrees "$(dirname "$git_common_dir")" "$worktree_root"
         if [[ ${#_nested_worktrees[@]} -gt 0 ]]; then
+          # Before the prompt: nothing destructive has run yet, and an unmerged
+          # nested branch means "-b" cannot do what it promises.
+          _gwtmux_check_nested_branches_merged "$(dirname "$git_common_dir")" \
+            "$delete_local" "$default_branch" "${_nested_worktrees[@]}" || return 1
           echo "Worktree '$(basename "$worktree_root")' has nested worktrees:"
           for nwt in "${_nested_worktrees[@]}"; do
             echo "  - $nwt"
@@ -768,16 +814,7 @@ EOF
       local -a switch_branches=()
 
       # Determine default branch for merge checking
-      local default_branch="$(git -C "$git_root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
-      if [[ -z "$default_branch" ]]; then
-        if git -C "$git_root" show-ref --verify --quiet refs/remotes/origin/main; then
-          default_branch="main"
-        elif git -C "$git_root" show-ref --verify --quiet refs/remotes/origin/master; then
-          default_branch="master"
-        else
-          default_branch="main" # ultimate fallback
-        fi
-      fi
+      local default_branch="$(_gwtmux_default_branch "$git_root")"
 
       # ====================================================================
       # PHASE 1: VALIDATION - All must pass or abort entire operation
@@ -820,10 +857,7 @@ EOF
 
         # Pre-flight check: validate branch merge status if safe delete requested
         if [[ -n "$wt_branch" && $delete_local -eq 1 ]]; then
-          # See the single-target check above: "+" for a branch checked out in
-          # another worktree is exactly this path's normal case.
-          if ! git -C "$git_root" branch --merged "$default_branch" --format='%(refname:short)' |
-            grep -Fxq -- "$wt_branch"; then
+          if ! _gwtmux_branch_merged "$git_root" "$wt_branch" "$default_branch"; then
             echo >&2 "Error: branch '$wt_branch' (worktree '$wt_name') is not merged into '$default_branch'. Use -B to force delete."
             return 1
           fi
@@ -857,6 +891,10 @@ EOF
           [[ ${#_nested_worktrees[@]} -gt 0 ]] && _all_nested_worktrees+=("${_nested_worktrees[@]}")
         done
         if [[ ${#_all_nested_worktrees[@]} -gt 0 ]]; then
+          # Before the prompt, and before phase 2: the branches of nested
+          # worktrees are subject to the same "-b" rule as the named targets.
+          _gwtmux_check_nested_branches_merged "$git_root" "$delete_local" \
+            "$default_branch" "${_all_nested_worktrees[@]}" || return 1
           echo "Nested worktrees found that will also be removed:"
           for nwt in "${_all_nested_worktrees[@]}"; do
             echo "  - $nwt"
