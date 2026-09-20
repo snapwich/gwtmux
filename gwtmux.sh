@@ -371,13 +371,38 @@ USAGE:
 NORMAL MODE:
   gwtmux <branch>          Create worktree for branch, open in new tmux window
   gwtmux <pr_number>       Create worktree for PR's branch (uses gh cli)
-  gwtmux <path>            Open existing worktree path in new tmux window
+  gwtmux <path>            Open existing worktree root in new tmux window
   gwtmux <repo>/<branch>   Create branch in repo at <repo>/default
   gwtmux branch1 branch2   Create multiple worktrees at once
-  gwtmux                   (From parent dir) Open windows for all existing worktrees
+  gwtmux                   Open windows for all existing worktrees
+                           (from the repo parent dir, or inside a flat repo)
 
   If window already exists for the branch, it will be selected instead.
   Branch names with slashes are converted to underscores for directory names.
+  A path argument must be the root of a worktree; a subdirectory is an error.
+  An argument counts as a path only when it is path-shaped ("/...", "./...",
+  "../...", "." or "..") or when it is a worktree root, so a branch name that
+  contains a slash is still a branch name.
+
+FLAT REPOS:
+  A repo whose root directory does not have the name "default" is a flat repo:
+  a plain clone with no <parent>/default layout. gwtmux only opens windows
+  there - it creates no worktrees and it does not fetch.
+
+                            convention              flat
+  gwtmux <branch> | <pr>    yes                     error
+  gwtmux <path>             yes                     yes, opens window
+  gwtmux (no args)          from parent dir         from inside repo
+  -d                        yes                     yes
+  -dw on repo root          error                   error
+  -db, -dB on repo root     yes (switch to primary) yes (switch to primary)
+  -dwB <name>               yes, any worktree       yes, any worktree
+  --rename in worktree      yes                     yes
+  --rename at repo root     error                   error
+
+  Windows are named <parent>/<branch> in a convention repo, and <repo> or
+  <repo>/<dir name> in a flat repo. Two worktrees of one repo cannot share a
+  directory name, because their windows would have the same name.
 
 DONE MODE (-d):
   gwtmux -d                Delete current worktree's tmux window only
@@ -389,6 +414,13 @@ DONE MODE (-d):
   gwtmux -d -wBr name...   Delete specific worktree(s) by name
 
   Flags can be combined: -dwbr, -dBrw, etc.
+  A <name> is matched against the repo's worktrees by path, then directory
+  name, then branch, and can reach any worktree of the repo. An ambiguous
+  name is an error and nothing is deleted.
+  In the main repo root, -w is an error, but -b and -B switch to the primary
+  branch (main or master) before they delete. That needs a tree with no
+  uncommitted changes, and a branch that is not the primary branch itself.
+  Bare -d deletes nothing, thus it switches nothing.
   If current window is last in session, renames to shell name instead of killing.
 
 RENAME MODE (--rename):
