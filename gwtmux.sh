@@ -51,6 +51,32 @@ _gwtmux_worktree_root() {
   (cd "$top" && pwd -P) 2>/dev/null
 }
 
+# Tell a flat repo from one that follows the directory convention. A convention
+# repo lives at "<parent>/default" with its worktrees as siblings; any other
+# repo root is flat, and gwtmux only ever opens windows for it. Purely a name
+# test: no probing, no marker file, and a repo literally named "default" is
+# read as a convention repo.
+# Args: <git_root>
+_gwtmux_is_flat() {
+  [[ "$(basename -- "$1")" != "default" ]]
+}
+
+# Decide whether a normal-mode argument names a path instead of a branch, by
+# the same rule the argument loop applies: explicitly path-shaped ("/...",
+# "./...", "../...", "." or "..") or the root of an existing worktree. A name
+# that merely contains a slash, like "feature/auth", stays a branch name.
+# Args: <arg>
+_gwtmux_arg_is_path() {
+  local arg="$1" resolved
+  case "$arg" in
+  /* | ./* | ../* | . | ..) return 0 ;;
+  esac
+  [[ -d "$arg" ]] || return 1
+  resolved="$(cd "$arg" 2>/dev/null && pwd -P)" || return 1
+  [[ -n "$resolved" ]] || return 1
+  [[ "$(_gwtmux_worktree_root "$resolved" 2>/dev/null)" == "$resolved" ]]
+}
+
 # Compute the tmux window name for a worktree. Single source of truth: every
 # naming site routes through here so one worktree always maps to one name.
 # Args: <worktree_path> [git_root] [branch]
@@ -66,10 +92,23 @@ _gwtmux_window_name() {
     git_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$wt_path")" || return 1
     git_root="$(dirname -- "$git_common_dir")"
   fi
-  parent_name="$(basename -- "$(dirname -- "$git_root")")"
 
   resolved_path="$(cd "$wt_path" 2>/dev/null && pwd -P)"
   [[ -z "$resolved_path" ]] && resolved_path="$wt_path"
+
+  # Flat repo: the repo directory names its own window, and its worktrees hang
+  # off that name by directory basename. Nothing here is branch-based, so an
+  # in-place "git switch" never moves a window out from under the user.
+  if _gwtmux_is_flat "$git_root"; then
+    if [[ "$resolved_path" == "$git_root" ]]; then
+      echo "$(basename -- "$git_root")"
+    else
+      echo "$(basename -- "$git_root")/$(basename -- "$resolved_path")"
+    fi
+    return 0
+  fi
+
+  parent_name="$(basename -- "$(dirname -- "$git_root")")"
 
   # The main repo root is named after its own directory ("<parent>/default"),
   # not after whatever branch happens to be checked out there.
@@ -967,6 +1006,35 @@ EOF
     fi
 
     if [[ $# -eq 0 ]]; then
+      # Flat repo: open a window for the repo itself plus one per worktree,
+      # wherever those live. Keyed on the repo the current directory belongs to
+      # (so a subdirectory or one of the worktrees works too), never on what the
+      # current directory happens to contain: a plain directory full of repos
+      # still falls through to the convention check below. No fetch - flat mode
+      # creates nothing and resolves no branch from a remote.
+      local noarg_common_dir="" noarg_root=""
+      if noarg_common_dir="$(_gwtmux_git_dir_path --git-common-dir)" &&
+        noarg_root="$(dirname -- "$noarg_common_dir")" &&
+        _gwtmux_is_flat "$noarg_root"; then
+        # Declared before the loop: zsh echoes a re-declared local that carries
+        # no assignment.
+        local flat_wt_path="" flat_wt_branch="" flat_window_name=""
+        while IFS=$'\t' read -r flat_wt_path flat_wt_branch; do
+          [[ -z "$flat_wt_path" ]] && continue
+          flat_window_name="$(_gwtmux_window_name "$flat_wt_path" "$noarg_root" "$flat_wt_branch")"
+          [[ -z "$flat_window_name" ]] && continue
+          if [[ -z "$(_gwtmux_window_id_by_name "$gwt_session" "$flat_window_name")" ]]; then
+            tmux new-window -t "$gwt_session" -n "$flat_window_name" -c "$flat_wt_path"
+          fi
+        done < <(_gwtmux_worktree_list "$noarg_root")
+
+        # Kill original zsh window if it was single pane
+        if [[ $can_reuse_window -eq 1 ]]; then
+          tmux kill-window -t "$current_window_id"
+        fi
+        return 0
+      fi
+
       # Multi-worktree mode - only works from ../default
       if ! $git_cmd -C "$PWD/default" rev-parse --git-dir &>/dev/null; then
         echo >&2 "Error: branch or PR number required"
@@ -1009,8 +1077,22 @@ EOF
       has_git_root=1
     fi
 
-    # Fetch once before processing all arguments (only if we have a git root)
-    if [[ $has_git_root -eq 1 ]]; then
+    # Fetch once before processing all arguments (only if we have a git root and
+    # some argument can need the remote). A flat repo creates no worktree and
+    # resolves no branch, and an argument that is already a path only opens a
+    # window for a worktree that exists, so neither is worth a network round
+    # trip. Declared before the loop: zsh echoes a re-declared local that
+    # carries no assignment.
+    local needs_fetch=0 fetch_arg=""
+    if [[ $has_git_root -eq 1 ]] && ! _gwtmux_is_flat "$git_root"; then
+      for fetch_arg in "$@"; do
+        if ! _gwtmux_arg_is_path "$fetch_arg"; then
+          needs_fetch=1
+          break
+        fi
+      done
+    fi
+    if [[ $needs_fetch -eq 1 ]]; then
       $git_cmd -C "$git_root" fetch -a
     fi
 
@@ -1040,7 +1122,7 @@ EOF
     local success_count=0
 
     # Declare loop variables outside the loop to avoid re-declaration issues
-    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched pr_branch arg_parent arg_basename resolved_parent repo_parent_candidate path_matched arg_is_path_shaped arg_worktree_root resolved_path existing_window_id
+    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched pr_branch arg_parent arg_basename resolved_parent repo_parent_candidate candidate_common_dir path_matched arg_is_path_shaped arg_worktree_root resolved_path existing_window_id
 
     # Save original directory for resolving relative args after cd
     local orig_pwd="$PWD"
@@ -1105,6 +1187,18 @@ EOF
               resolved_parent="$repo_parent_candidate"
               break
             fi
+            # A flat repo root inside the path. There is no default/ to hold a
+            # sibling worktree, and walking past it would fold the whole prefix
+            # into the branch name and offer to create a branch named after a
+            # filesystem path in whatever repo the current directory belongs to.
+            if [[ -n "$repo_parent_candidate" ]]; then
+              candidate_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$repo_parent_candidate")"
+              if [[ -n "$candidate_common_dir" && "$(dirname -- "$candidate_common_dir")" == "$repo_parent_candidate" ]] &&
+                _gwtmux_is_flat "$repo_parent_candidate"; then
+                echo >&2 "Error: '$repo_parent_candidate' is a flat repo (no default/ layout) — cannot create worktree '$arg_basename' there."
+                return 1
+              fi
+            fi
           fi
           # Not a repo parent: fold this component into the branch name and go up
           arg_basename="$(basename -- "$arg_parent")/$arg_basename"
@@ -1143,6 +1237,12 @@ EOF
       if [[ $path_matched -eq 0 && $repo_path_matched -eq 0 ]]; then
         if [[ $has_git_root -eq 0 ]]; then
           echo >&2 "Error: not in a git repo or parent of default/.git"
+          return 1
+        fi
+        # Flat repos are window-only. Refused here, before the gh lookup below,
+        # so a PR number costs no API call either.
+        if _gwtmux_is_flat "$git_root"; then
+          echo >&2 "Error: '$git_root' is a flat repo (no default/ layout) — cannot create worktree '$arg' there."
           return 1
         fi
         branch="$(

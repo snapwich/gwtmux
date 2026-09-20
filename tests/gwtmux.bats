@@ -143,6 +143,31 @@ setup_worktree_structure() {
   MAIN_REPO="$WORKTREE_PARENT/default"
 }
 
+# Setup a flat repo: a plain clone at $TEST_TEMP_DIR/flat/<name> with its own
+# bare remote and no default/ wrapper, so the repo root directory is what gwtmux
+# names the window after.
+setup_flat_repo() {
+  local repo_name="${1:-flatrepo}"
+
+  FLAT_REMOTE="$TEST_TEMP_DIR/flat-remote-$repo_name.git"
+  git init --bare "$FLAT_REMOTE" >/dev/null 2>&1
+  git -C "$FLAT_REMOTE" symbolic-ref HEAD refs/heads/main
+
+  FLAT_PARENT="$TEST_TEMP_DIR/flat"
+  mkdir -p "$FLAT_PARENT"
+  FLAT_REPO="$FLAT_PARENT/$repo_name"
+  git clone "$FLAT_REMOTE" "$FLAT_REPO" >/dev/null 2>&1
+
+  git -C "$FLAT_REPO" config user.name "Test User"
+  git -C "$FLAT_REPO" config user.email "test@example.com"
+  git -C "$FLAT_REPO" checkout -b main >/dev/null 2>&1
+  echo "initial" >"$FLAT_REPO/README.md"
+  git -C "$FLAT_REPO" add README.md
+  git -C "$FLAT_REPO" commit -m "Initial commit" >/dev/null 2>&1
+  git -C "$FLAT_REPO" push -u origin main >/dev/null 2>&1
+  git -C "$FLAT_REPO" remote set-head origin main >/dev/null 2>&1
+}
+
 # Create a fake gh command that returns a PR branch name
 stub_gh_pr() {
   local pr_number="$1"
@@ -3376,4 +3401,447 @@ myrepo/existing"
   # Validation runs before any deletion, so the valid name survives too
   assert_dir_exists "$WORKTREE_PARENT/keeper"
   assert_dir_exists "$MAIN_REPO"
+}
+
+# ----------------------------------------------------------------------------
+# Flat repos: normal mode
+# ----------------------------------------------------------------------------
+
+@test "gwtmux: opens a flat repo via absolute path and creates no worktree" {
+  setup_flat_repo "j2"
+
+  local before_list="$(git -C "$FLAT_REPO" worktree list --porcelain)"
+
+  send_cmd "$TEST_SESSION" "cd $TEST_TEMP_DIR && gwtmux $FLAT_REPO"
+  wait_for_window_exists "j2"
+  wait_cmd_done
+
+  # Named after the repo directory alone, with no parent prefix
+  assert tmux_window_exists "j2"
+  refute tmux_window_exists "flat/j2"
+
+  # Window-only: nothing was added to the repo
+  assert_equal "$(git -C "$FLAT_REPO" worktree list --porcelain)" "$before_list"
+}
+
+@test "gwtmux: opens a flat repo via relative path and creates no worktree" {
+  setup_flat_repo "j2"
+
+  local before_list="$(git -C "$FLAT_REPO" worktree list --porcelain)"
+
+  send_cmd "$TEST_SESSION" "cd $FLAT_PARENT && gwtmux ./j2"
+  wait_for_window_exists "j2"
+  wait_cmd_done
+
+  assert tmux_window_exists "j2"
+  assert_equal "$(git -C "$FLAT_REPO" worktree list --porcelain)" "$before_list"
+}
+
+@test "gwtmux: names a flat repo's worktree after the repo and its directory" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" worktree add "$FLAT_PARENT/j2-work" -b work main >/dev/null 2>&1
+
+  send_cmd "$TEST_SESSION" "cd $FLAT_REPO && gwtmux $FLAT_PARENT/j2-work"
+  wait_for_window_exists "j2/j2-work"
+  wait_cmd_done
+
+  # Directory basename, not the branch name
+  assert tmux_window_exists "j2/j2-work"
+  refute tmux_window_exists "j2/work"
+}
+
+@test "gwtmux: errors on a subdirectory path of a flat repo" {
+  setup_flat_repo "j2"
+  mkdir -p "$FLAT_REPO/src"
+  cd "$FLAT_REPO"
+
+  local before_count="$(get_window_count)"
+  run gwtmux "$FLAT_REPO/src"
+  assert_failure
+  assert_output --partial "is not a worktree root"
+  assert_output --partial "$FLAT_REPO"
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux: errors on a branch argument inside a flat repo" {
+  setup_flat_repo "j2"
+  stub_gh_fail
+  cd "$FLAT_REPO"
+
+  local before_list="$(git -C "$FLAT_REPO" worktree list --porcelain)"
+  local before_count="$(get_window_count)"
+
+  run gwtmux feature-x
+  assert_failure
+  assert_output --partial "'$FLAT_REPO' is a flat repo"
+  assert_output --partial "cannot create worktree 'feature-x'"
+
+  refute [ -d "$FLAT_PARENT/feature-x" ]
+  assert_equal "$(git -C "$FLAT_REPO" worktree list --porcelain)" "$before_list"
+  assert_equal "$(get_window_count)" "$before_count"
+  run git -C "$FLAT_REPO" branch
+  refute_output --partial "feature-x"
+}
+
+@test "gwtmux: errors on a PR number inside a flat repo before calling gh" {
+  setup_flat_repo "j2"
+
+  # Records the call instead of answering it: the refusal must come first
+  cat >"$STUB_DIR/gh" <<EOF
+#!/bin/bash
+touch "$TEST_TEMP_DIR/gh_was_called"
+echo "pr-branch"
+EOF
+  chmod +x "$STUB_DIR/gh"
+
+  cd "$FLAT_REPO"
+  run gwtmux 123
+  assert_failure
+  assert_output --partial "'$FLAT_REPO' is a flat repo"
+  assert_output --partial "cannot create worktree '123'"
+
+  refute [ -f "$TEST_TEMP_DIR/gh_was_called" ]
+}
+
+@test "gwtmux: errors on a branch argument under a flat repo path" {
+  setup_worktree_structure "myrepo"
+  setup_flat_repo "j2"
+  cd "$MAIN_REPO"
+
+  run gwtmux "$FLAT_REPO/feature-x"
+  assert_failure
+  assert_output --partial "'$FLAT_REPO' is a flat repo"
+  assert_output --partial "cannot create worktree 'feature-x'"
+
+  # No branch named after a filesystem path in the repo we happened to stand in
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "feature-x"
+  refute [ -d "$FLAT_REPO/feature-x" ]
+}
+
+@test "gwtmux: errors on a branch argument under a flat repo subdirectory path" {
+  setup_worktree_structure "myrepo"
+  setup_flat_repo "j2"
+  mkdir -p "$FLAT_REPO/src"
+  cd "$MAIN_REPO"
+
+  run gwtmux "$FLAT_REPO/src/feature-x"
+  assert_failure
+  assert_output --partial "'$FLAT_REPO' is a flat repo"
+  # The walk folds the prefix into the branch name, as it does for a repo parent
+  assert_output --partial "cannot create worktree 'src/feature-x'"
+}
+
+@test "gwtmux: no args opens a flat repo and its worktrees" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" worktree add "$FLAT_PARENT/j2-work" -b work main >/dev/null 2>&1
+
+  local shell_name=$(basename "${SHELL:-zsh}")
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux rename-window -t "$first_window" "$shell_name"
+
+  send_cmd "$first_window" "cd $FLAT_REPO && gwtmux"
+  wait_for_window_exists "j2/j2-work"
+  wait_cmd_done
+
+  assert tmux_window_exists "j2"
+  assert tmux_window_exists "j2/j2-work"
+  # The reusable single-pane shell window is killed, as in convention mode
+  refute tmux_window_exists "$shell_name"
+}
+
+@test "gwtmux: no args works from a subdirectory of a flat repo" {
+  setup_flat_repo "j2"
+  mkdir -p "$FLAT_REPO/src/deep"
+
+  local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$TEST_TEMP_DIR" -P -F "#{window_id}")
+
+  send_cmd "$runner" "cd $FLAT_REPO/src/deep && gwtmux"
+  wait_for_window_exists "j2"
+  wait_cmd_done
+
+  assert tmux_window_exists "j2"
+}
+
+@test "gwtmux: no args works from inside a flat repo's worktree" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" worktree add "$FLAT_PARENT/j2-work" -b work main >/dev/null 2>&1
+
+  local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$TEST_TEMP_DIR" -P -F "#{window_id}")
+
+  send_cmd "$runner" "cd $FLAT_PARENT/j2-work && gwtmux"
+  wait_for_window_exists "j2"
+  wait_cmd_done
+
+  assert tmux_window_exists "j2"
+  assert tmux_window_exists "j2/j2-work"
+}
+
+@test "gwtmux: no args still errors in a directory that only contains repos" {
+  setup_flat_repo "j2"
+  cd "$FLAT_PARENT"
+
+  run gwtmux
+  assert_failure
+  assert_output --partial "branch or PR number required"
+}
+
+@test "gwtmux: selects the existing window of a flat repo instead of a second one" {
+  setup_flat_repo "j2"
+
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux new-window -t "$TEST_SESSION" -n "j2" -c "$FLAT_REPO" >/dev/null 2>&1
+  local before_count="$(get_window_count)"
+
+  send_cmd "$first_window" "cd $TEST_TEMP_DIR && gwtmux $FLAT_REPO"
+  wait_cmd_done
+
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux: opens a flat repo path without fetching from an unreachable origin" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" remote set-url origin "$TEST_TEMP_DIR/gone.git"
+  cd "$FLAT_REPO"
+
+  run gwtmux "$FLAT_REPO"
+  assert_success
+  refute_output --partial "does not appear to be a git repository"
+  assert tmux_window_exists "j2"
+}
+
+@test "gwtmux: opens a path in a convention repo without fetching" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b existing-wt "$WORKTREE_PARENT/existing-wt" main >/dev/null 2>&1
+  git -C "$MAIN_REPO" remote set-url origin "$TEST_TEMP_DIR/gone.git"
+  cd "$MAIN_REPO"
+
+  # Every argument is a path, so nothing needs the remote
+  run gwtmux "$WORKTREE_PARENT/existing-wt"
+  assert_success
+  refute_output --partial "does not appear to be a git repository"
+  assert tmux_window_exists "myrepo/existing-wt"
+}
+
+# ----------------------------------------------------------------------------
+# Flat repos: done mode
+# ----------------------------------------------------------------------------
+
+@test "gwtmux -d: closes a flat repo's window and leaves the branch alone" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" checkout -b feature-x >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "j2" -c "$FLAT_REPO" -P -F "#{window_id}")
+
+  send_cmd "$new_window" "cd $FLAT_REPO && gwtmux -d"
+  wait_for_window_closed "j2"
+  wait_cmd_done
+
+  # Nothing was deleted, so nothing was switched either
+  run git -C "$FLAT_REPO" branch --show-current
+  assert_output "feature-x"
+}
+
+@test "gwtmux -d: -dw in a flat repo root errors and changes nothing" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" checkout -b feature-x >/dev/null 2>&1
+  cd "$FLAT_REPO"
+
+  local before_count="$(get_window_count)"
+  run gwtmux -d -w
+  assert_failure
+  assert_output --partial "in main repo, not a worktree"
+
+  run git -C "$FLAT_REPO" branch --show-current
+  assert_output "feature-x"
+  assert_dir_exists "$FLAT_REPO"
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux -d: -dB in a flat repo root switches to the primary branch and deletes" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" checkout -b feature-x >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "j2" -c "$FLAT_REPO" -P -F "#{window_id}")
+
+  send_cmd "$new_window" "cd $FLAT_REPO && gwtmux -dB"
+  wait_for_window_closed "j2"
+  wait_cmd_done
+
+  run git -C "$FLAT_REPO" branch --show-current
+  assert_output "main"
+  run git -C "$FLAT_REPO" branch
+  refute_output --partial "feature-x"
+}
+
+@test "gwtmux -d: -dB in a flat repo root errors while on the primary branch" {
+  setup_flat_repo "j2"
+  cd "$FLAT_REPO"
+
+  run gwtmux -dB
+  assert_failure
+  assert_output --partial "is the primary branch"
+
+  run git -C "$FLAT_REPO" branch --show-current
+  assert_output "main"
+}
+
+@test "gwtmux -d: -dB in a flat repo root errors on an uncommitted change" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" checkout -b feature-x >/dev/null 2>&1
+  echo "dirty" >>"$FLAT_REPO/README.md"
+  cd "$FLAT_REPO"
+
+  run gwtmux -dB
+  assert_failure
+  assert_output --partial "uncommitted changes"
+
+  run git -C "$FLAT_REPO" branch --show-current
+  assert_output "feature-x"
+  run git -C "$FLAT_REPO" branch
+  assert_output --partial "feature-x"
+}
+
+@test "gwtmux -d: -dB in a flat repo root ignores untracked files" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" checkout -b feature-x >/dev/null 2>&1
+  echo "scratch" >"$FLAT_REPO/untracked.txt"
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "j2" -c "$FLAT_REPO" -P -F "#{window_id}")
+
+  send_cmd "$new_window" "cd $FLAT_REPO && gwtmux -dB"
+  wait_for_window_closed "j2"
+  wait_cmd_done
+
+  run git -C "$FLAT_REPO" branch --show-current
+  assert_output "main"
+  assert_file_exists "$FLAT_REPO/untracked.txt"
+}
+
+@test "gwtmux -d: -dbr in a flat repo root deletes the merged branch and its remote" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" checkout -b feature-x >/dev/null 2>&1
+  git -C "$FLAT_REPO" push -u origin feature-x >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "j2" -c "$FLAT_REPO" -P -F "#{window_id}")
+
+  send_cmd "$new_window" "cd $FLAT_REPO && gwtmux -dbr"
+  wait_for_window_closed "j2"
+  wait_cmd_done
+
+  run git -C "$FLAT_REPO" branch --show-current
+  assert_output "main"
+  run git -C "$FLAT_REPO" branch
+  refute_output --partial "feature-x"
+  run git -C "$FLAT_REPO" branch -r
+  refute_output --partial "origin/feature-x"
+}
+
+@test "gwtmux -d: -db in a flat repo root errors on an unmerged branch" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" checkout -b feature-x >/dev/null 2>&1
+  echo "work" >"$FLAT_REPO/work.txt"
+  git -C "$FLAT_REPO" add work.txt
+  git -C "$FLAT_REPO" commit -m "Unmerged commit" >/dev/null 2>&1
+  cd "$FLAT_REPO"
+
+  run gwtmux -db
+  assert_failure
+  assert_output --partial "not merged"
+
+  run git -C "$FLAT_REPO" branch --show-current
+  assert_output "feature-x"
+}
+
+@test "gwtmux -d: -dB in a flat repo root errors with no local main or master" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" checkout -b feature-x >/dev/null 2>&1
+  git -C "$FLAT_REPO" branch -D main >/dev/null 2>&1
+  cd "$FLAT_REPO"
+
+  run gwtmux -dB
+  assert_failure
+  assert_output --partial "cannot determine primary branch"
+
+  run git -C "$FLAT_REPO" branch --show-current
+  assert_output "feature-x"
+}
+
+@test "gwtmux -d: -dB in a flat repo root keeps the cwd when renaming the last window" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" checkout -b feature-x >/dev/null 2>&1
+
+  local window_count_before=$(get_window_count)
+  assert [ "$window_count_before" -eq 1 ]
+
+  local window_id=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  local expected_shell=$(basename "${SHELL:-zsh}")
+
+  send_cmd "$window_id" "cd $FLAT_REPO && gwtmux -dB"
+  wait_until "[ \"\$(tmux display-message -t '$window_id' -p '#W')\" = '$expected_shell' ]"
+  wait_cmd_done
+
+  assert_equal "$(get_window_count)" "1"
+
+  # Nothing was deleted, so the pane stays where it was
+  run tmux display-message -t "$window_id" -p '#{pane_current_path}'
+  assert_output "$FLAT_REPO"
+
+  run git -C "$FLAT_REPO" branch --show-current
+  assert_output "main"
+}
+
+@test "gwtmux -d: -dwB reaches a flat repo's worktree by name and closes its window" {
+  setup_flat_repo "j2"
+  mkdir -p "$TEST_TEMP_DIR/elsewhere"
+  git -C "$FLAT_REPO" worktree add "$TEST_TEMP_DIR/elsewhere/out-wt" -b out-wt main >/dev/null 2>&1
+
+  local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$FLAT_REPO" -P -F "#{window_id}")
+  tmux new-window -t "$TEST_SESSION" -n "j2/out-wt" -c "$TEST_TEMP_DIR/elsewhere/out-wt" >/dev/null 2>&1
+
+  send_cmd "$runner" "cd $FLAT_REPO && gwtmux -dwB out-wt"
+  wait_for_window_closed "j2/out-wt"
+  wait_cmd_done
+
+  refute [ -d "$TEST_TEMP_DIR/elsewhere/out-wt" ]
+  run git -C "$FLAT_REPO" branch
+  refute_output --partial "out-wt"
+}
+
+# ----------------------------------------------------------------------------
+# Flat repos: rename mode
+# ----------------------------------------------------------------------------
+
+@test "gwtmux --rename: renames a flat repo's worktree in its own parent" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" worktree add "$FLAT_PARENT/old-name" -b old-name main >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "j2/old-name" -c "$FLAT_PARENT/old-name" -P -F "#{window_id}")
+
+  send_cmd "$new_window" "cd $FLAT_PARENT/old-name && gwtmux --rename new-name"
+  wait_for_dir_exists "$FLAT_PARENT/new-name"
+  wait_cmd_done
+
+  assert_dir_exists "$FLAT_PARENT/new-name"
+  refute [ -d "$FLAT_PARENT/old-name" ]
+
+  run git -C "$FLAT_PARENT/new-name" branch --show-current
+  assert_output "new-name"
+
+  # Named after the repo, not after the directory that holds the worktree
+  run tmux display-message -t "$new_window" -p '#W'
+  assert_output "j2/new-name"
+}
+
+@test "gwtmux --rename: refuses a flat repo root" {
+  setup_flat_repo "j2"
+  cd "$FLAT_REPO"
+
+  run gwtmux --rename new-name
+  assert_failure
+  assert_output --partial "in main repo, not a worktree"
+
+  assert_dir_exists "$FLAT_REPO"
+  run git -C "$FLAT_REPO" branch --show-current
+  assert_output "main"
 }
