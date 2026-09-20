@@ -3007,3 +3007,160 @@ myrepo/existing"
   assert_output --partial "wt-a"
   assert_output --partial "child-a"
 }
+
+# ----------------------------------------------------------------------------
+# Done mode: worktree name resolution
+# ----------------------------------------------------------------------------
+
+@test "gwtmux -d: resolves a worktree outside the repo parent by name" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Not a sibling of default/, so the old path guess could never find it
+  mkdir -p "$TEST_TEMP_DIR/elsewhere"
+  git worktree add "$TEST_TEMP_DIR/elsewhere/out-wt" -b out-wt main >/dev/null 2>&1
+
+  run gwtmux -dwB out-wt
+  assert_success
+
+  refute [ -d "$TEST_TEMP_DIR/elsewhere/out-wt" ]
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "out-wt"
+}
+
+@test "gwtmux -d: resolves a worktree by its branch name" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Directory name and branch name deliberately differ
+  git worktree add "$WORKTREE_PARENT/dir-x" -b br-y main >/dev/null 2>&1
+
+  run gwtmux -dwB br-y
+  assert_success
+
+  refute [ -d "$WORKTREE_PARENT/dir-x" ]
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "br-y"
+}
+
+@test "gwtmux -d: directory name wins over another worktree's branch name" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # "target" is one worktree's directory and another worktree's branch
+  git worktree add "$WORKTREE_PARENT/target" -b a-branch main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/b-dir" -b target main >/dev/null 2>&1
+
+  run gwtmux -dwB target
+  assert_success
+
+  refute [ -d "$WORKTREE_PARENT/target" ]
+  assert_dir_exists "$WORKTREE_PARENT/b-dir"
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "a-branch"
+  assert_output --partial "target"
+}
+
+@test "gwtmux -d: errors on an ambiguous worktree name and deletes nothing" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  mkdir -p "$WORKTREE_PARENT/one" "$WORKTREE_PARENT/two"
+  git worktree add "$WORKTREE_PARENT/one/same" -b same-one main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/two/same" -b same-two main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/keeper" -b keeper main >/dev/null 2>&1
+
+  run gwtmux -dwB same keeper
+  assert_failure
+  assert_output --partial "worktree 'same' is ambiguous"
+  assert_output --partial "$WORKTREE_PARENT/one/same"
+  assert_output --partial "$WORKTREE_PARENT/two/same"
+
+  # The whole invocation aborts, so the unambiguous name survives too
+  assert_dir_exists "$WORKTREE_PARENT/one/same"
+  assert_dir_exists "$WORKTREE_PARENT/two/same"
+  assert_dir_exists "$WORKTREE_PARENT/keeper"
+}
+
+@test "gwtmux -d: resolves a worktree by explicit path" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  mkdir -p "$WORKTREE_PARENT/one" "$WORKTREE_PARENT/two"
+  git worktree add "$WORKTREE_PARENT/one/same" -b same-one main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/two/same" -b same-two main >/dev/null 2>&1
+
+  # A path picks one of the two worktrees the basename cannot tell apart
+  run gwtmux -dwB ../two/same
+  assert_success
+
+  refute [ -d "$WORKTREE_PARENT/two/same" ]
+  assert_dir_exists "$WORKTREE_PARENT/one/same"
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "same-two"
+  assert_output --partial "same-one"
+}
+
+@test "gwtmux -d: finds the repo from a path argument outside any repo" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/far-wt" -b far-wt main >/dev/null 2>&1
+
+  # Not in a git repo: the path's own .git file leads back to the repo
+  cd "$TEST_TEMP_DIR"
+  run git rev-parse --git-dir
+  assert_failure
+
+  run gwtmux -dwB ./myrepo/far-wt
+  assert_success
+
+  refute [ -d "$WORKTREE_PARENT/far-wt" ]
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "far-wt"
+}
+
+# ----------------------------------------------------------------------------
+# Window name collisions
+# ----------------------------------------------------------------------------
+
+@test "gwtmux: errors on a path whose worktree directory name is not unique" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  mkdir -p "$WORKTREE_PARENT/one" "$WORKTREE_PARENT/two"
+  git worktree add "$WORKTREE_PARENT/one/same" -b same-one main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/two/same" -b same-two main >/dev/null 2>&1
+
+  local before_count="$(get_window_count)"
+  run gwtmux "$WORKTREE_PARENT/two/same"
+  assert_failure
+  assert_output --partial "is not unique"
+  assert_output --partial "$WORKTREE_PARENT/one/same"
+  assert_output --partial "$WORKTREE_PARENT/two/same"
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux: opens a path when only another repo shares the directory name" {
+  setup_worktree_structure "myrepo"
+
+  # Second repo with a worktree of the same directory basename
+  local OTHER_PARENT="$TEST_TEMP_DIR/otherrepo"
+  mkdir -p "$OTHER_PARENT/default"
+  git init "$OTHER_PARENT/default" >/dev/null 2>&1
+  git -C "$OTHER_PARENT/default" config user.name "Test"
+  git -C "$OTHER_PARENT/default" config user.email "test@test.com"
+  echo "test" >"$OTHER_PARENT/default/file.txt"
+  git -C "$OTHER_PARENT/default" add .
+  git -C "$OTHER_PARENT/default" commit -m "init" >/dev/null 2>&1
+  git -C "$OTHER_PARENT/default" worktree add -b shared "$OTHER_PARENT/shared" >/dev/null 2>&1
+
+  git -C "$MAIN_REPO" worktree add -b shared "$WORKTREE_PARENT/shared" main >/dev/null 2>&1
+
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux $WORKTREE_PARENT/shared"
+  wait_for_window_exists "myrepo/shared"
+  wait_cmd_done
+
+  run get_tmux_windows
+  assert_output --partial "myrepo/shared"
+}

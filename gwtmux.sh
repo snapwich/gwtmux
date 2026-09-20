@@ -99,6 +99,114 @@ _gwtmux_check_deps() {
   fi
 }
 
+# List a repo's worktrees as "<path><TAB><branch>" lines, with an empty branch
+# for a detached HEAD. One pass over --porcelain, so a caller that needs both
+# fields does not run a second git command per worktree.
+# Args: <git_root>
+_gwtmux_worktree_list() {
+  git -C "$1" worktree list --porcelain 2>/dev/null | awk '
+    /^worktree /{
+      if (wt != "") print wt "\t" br
+      wt = substr($0, 10)
+      br = ""
+      next
+    }
+    /^branch refs\/heads\//{ br = substr($0, 19) }
+    END { if (wt != "") print wt "\t" br }
+  '
+}
+
+# Resolve a done-mode <name> argument to the path of one of a repo's worktrees.
+# Tiers are tried in order and the first one with any match wins:
+#   1. path     - <name> is path-shaped and resolves to a listed worktree
+#   2. basename - worktree dir basename equals <name>, or its
+#                 slashes-to-underscores form (the name normal mode gave the dir)
+#   3. branch   - worktree's current branch equals <name>
+# Two matches inside one tier are ambiguous. Picking one would delete the wrong
+# worktree, so the candidates are listed and the caller aborts. The check is
+# lazy: only the name actually asked for can be ambiguous, duplicate basenames
+# elsewhere in the repo are nobody's business.
+# Args: <git_root> <name> [base_dir]  (base_dir resolves relative names, $PWD)
+# Prints the worktree path. Returns 1 when nothing matched (the caller reports
+# that, it knows the context) and 2 when the name was ambiguous (reported here).
+_gwtmux_resolve_worktree() {
+  local git_root="$1" name="$2" base_dir="${3:-$PWD}"
+  local dir_name="${name//\//_}"
+  local target="" wt_path wt_branch wt_base
+  local -a tier_path=() tier_base=() tier_branch=() candidates=()
+
+  case "$name" in
+  /* | ./* | ../*)
+    target="$(cd "$base_dir" 2>/dev/null && cd "$name" 2>/dev/null && pwd -P)"
+    ;;
+  esac
+
+  while IFS=$'\t' read -r wt_path wt_branch; do
+    [[ -z "$wt_path" ]] && continue
+    wt_base="${wt_path##*/}"
+    # Each worktree counts for its own highest tier only, so a worktree matched
+    # by path is not also a basename candidate.
+    if [[ -n "$target" && "$wt_path" == "$target" ]]; then
+      tier_path+=("$wt_path")
+    elif [[ "$wt_base" == "$name" || "$wt_base" == "$dir_name" ]]; then
+      tier_base+=("$wt_path")
+    elif [[ -n "$wt_branch" && "$wt_branch" == "$name" ]]; then
+      tier_branch+=("$wt_path")
+    fi
+  done < <(_gwtmux_worktree_list "$git_root")
+
+  if [[ ${#tier_path[@]} -gt 0 ]]; then
+    candidates=("${tier_path[@]}")
+  elif [[ ${#tier_base[@]} -gt 0 ]]; then
+    candidates=("${tier_base[@]}")
+  elif [[ ${#tier_branch[@]} -gt 0 ]]; then
+    candidates=("${tier_branch[@]}")
+  else
+    return 1
+  fi
+
+  if [[ ${#candidates[@]} -gt 1 ]]; then
+    echo >&2 "Error: worktree '$name' is ambiguous - candidates:"
+    for wt_path in "${candidates[@]}"; do
+      echo >&2 "  - $wt_path"
+    done
+    echo >&2 "Pass a path to pick one."
+    return 2
+  fi
+
+  # Printed via [@] expansion: the one element, without an index that would
+  # differ between bash and zsh.
+  printf '%s\n' "${candidates[@]}"
+}
+
+# Refuse a worktree whose directory basename another worktree of the same repo
+# already uses. Window names are built from that basename, so the two worktrees
+# map to one name and opening the second would silently select the first one's
+# window instead. Lazy like the resolver: only the worktree asked for is checked.
+# Args: <worktree_path>
+_gwtmux_check_unique_basename() {
+  local wt_path="$1" git_common_dir git_root wt_base other_path other_rest
+  local -a dupes=()
+
+  git_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$wt_path")" || return 0
+  git_root="$(dirname -- "$git_common_dir")"
+  wt_base="${wt_path##*/}"
+
+  while IFS=$'\t' read -r other_path other_rest; do
+    [[ -z "$other_path" || "$other_path" == "$wt_path" ]] && continue
+    [[ "${other_path##*/}" == "$wt_base" ]] && dupes+=("$other_path")
+  done < <(_gwtmux_worktree_list "$git_root")
+
+  [[ ${#dupes[@]} -eq 0 ]] && return 0
+
+  echo >&2 "Error: worktree directory '$wt_base' is not unique in '$git_root' - window names would collide:"
+  echo >&2 "  - $wt_path"
+  for other_path in "${dupes[@]}"; do
+    echo >&2 "  - $other_path"
+  done
+  return 1
+}
+
 # Find worktrees nested under a given worktree path
 # Sets caller's _nested_worktrees array
 _gwtmux_find_nested_worktrees() {
@@ -301,12 +409,22 @@ EOF
     if ! git_common_dir="$(_gwtmux_git_dir_path --git-common-dir)"; then
       # Not in a git repo - but if worktree names were provided, try to find git root from them
       if [[ ${#worktree_names[@]} -gt 0 ]]; then
-        # Try to find git common dir from the first specified worktree
+        # Try to find git common dir from the first specified worktree. The name
+        # may be a path ("/...", "./...", "../...") or the basename of a
+        # worktree directory here; either way the directory's .git file points
+        # back at the repo.
         # Use array index that works in both bash (0-indexed) and zsh (1-indexed)
         local first_wt_name="${worktree_names[*]:0:1}"
         [[ -z "$first_wt_name" ]] && first_wt_name="${worktree_names[1]}"
-        local first_dir_name="${first_wt_name//\//_}"
-        local first_wt_path="$PWD/$first_dir_name"
+        local first_wt_path
+        case "$first_wt_name" in
+        /*) first_wt_path="$first_wt_name" ;;
+        ./* | ../*) first_wt_path="$PWD/$first_wt_name" ;;
+        *)
+          first_wt_path="$PWD/${first_wt_name//\//_}"
+          [[ -d "$first_wt_path" ]] || first_wt_path="$PWD/$first_wt_name"
+          ;;
+        esac
         if [[ -d "$first_wt_path" ]]; then
           git_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$first_wt_path")"
         fi
@@ -450,13 +568,15 @@ EOF
       # PHASE 1: VALIDATION - All must pass or abort entire operation
       # ====================================================================
       for wt_name in "${worktree_names[@]}"; do
-        # Convert slashes to underscores (same as normal mode)
-        local dir_name="${wt_name//\//_}"
-        local wt_path="$parent_dir/$dir_name"
-
-        # Check if worktree exists
-        if ! git -C "$git_root" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}' | grep -Fxq "$wt_path"; then
-          echo >&2 "Error: worktree '$wt_name' (path: $wt_path) does not exist"
+        # Resolve the name against the repo's own worktree list (path, then dir
+        # basename, then branch). Replaces the old guess of "sibling of the repo
+        # root named after the branch", which could only ever find worktrees
+        # laid out that way.
+        local wt_path resolve_rc=0
+        wt_path="$(_gwtmux_resolve_worktree "$git_root" "$wt_name")" || resolve_rc=$?
+        if [[ $resolve_rc -ne 0 ]]; then
+          # rc 2 is an ambiguous name, already reported with its candidates
+          [[ $resolve_rc -eq 1 ]] && echo >&2 "Error: worktree '$wt_name' does not exist"
           return 1
         fi
 
@@ -934,6 +1054,9 @@ EOF
       # Name the window. A worktree that does not exist yet cannot be read, so
       # pass its repo root and branch along.
       if [[ $path_matched -eq 1 ]]; then
+        # A window name is only unique if the worktree's dir basename is, so
+        # check before a duplicate sends us to some other worktree's window.
+        _gwtmux_check_unique_basename "$worktree_path" || return 1
         window_name="$(_gwtmux_window_name "$worktree_path")"
       else
         window_name="$(_gwtmux_window_name "$worktree_path" "$git_root" "$branch")"
