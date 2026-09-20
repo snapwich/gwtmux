@@ -1725,7 +1725,6 @@ myrepo/existing"
   run get_tmux_windows
   assert_output --partial "myrepo/baz"
 }
-
 @test "gwtmux --rename: keeps a shared upstream branch the renamed branch does not contain" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
@@ -3192,8 +3191,6 @@ myrepo/existing"
   assert_output --partial "wt-a"
   assert_output --partial "child-a"
 }
-
-
 @test "gwtmux -d: multi-target keeps window and branch when the worktree removal fails" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
@@ -3332,6 +3329,7 @@ myrepo/existing"
   assert_output --partial "parent-wt"
   assert_output --partial "nested"
 }
+
 # ----------------------------------------------------------------------------
 # Done mode: worktree name resolution
 # ----------------------------------------------------------------------------
@@ -3993,6 +3991,11 @@ EOF
   assert_equal "$(cat "$CMD_MARKER")" "0"
 
   assert_equal "$(get_window_count)" "$before_count"
+  # The count alone survives the existing-window lookup being deleted: gwtmux
+  # then RENAMES the invoking window to "j2" instead of selecting the window
+  # that is already there, which keeps the count and leaves two windows called
+  # "j2". Only name uniqueness tells the two apart.
+  assert_equal "$(get_tmux_windows | grep -Fxc 'j2')" "1"
 }
 
 # D19: flat mode never fetches. The path-argument tests below cannot prove this
