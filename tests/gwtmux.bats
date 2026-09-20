@@ -1726,6 +1726,63 @@ myrepo/existing"
   assert_output --partial "myrepo/baz"
 }
 
+@test "gwtmux --rename: keeps a shared upstream branch the renamed branch does not contain" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # A shared branch on the remote
+  git checkout -q -b develop main
+  echo "base" >base.txt
+  git add base.txt
+  git commit -m "develop base" >/dev/null 2>&1
+  git push -q -u origin develop >/dev/null 2>&1
+
+  # "git checkout -b feat origin/develop" is ordinary git, and it leaves feat
+  # tracking a remote branch with a DIFFERENT name
+  git worktree add "$WORKTREE_PARENT/feat" -b feat develop >/dev/null 2>&1
+  git -C "$WORKTREE_PARENT/feat" branch -q -u origin/develop
+
+  # A colleague advances origin/develop; feat never gets that commit
+  echo "colleague" >colleague.txt
+  git add colleague.txt
+  git commit -m "colleague work" >/dev/null 2>&1
+  git push -q origin develop >/dev/null 2>&1
+  local colleague_commit="$(git rev-parse HEAD)"
+  git checkout -q main
+  git branch -q -D develop
+
+  # Own commit on feat, so the author guard cannot be what stops the delete
+  cd "$WORKTREE_PARENT/feat"
+  git config user.name "Test User"
+  git config user.email "test@example.com"
+  echo "mine" >mine.txt
+  git add mine.txt
+  git commit -m "my work" >/dev/null 2>&1
+  cd "$MAIN_REPO"
+
+  local wt_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/feat" -c "$WORKTREE_PARENT/feat" -P -F "#{window_id}")
+  send_cmd "$wt_window" "cd $WORKTREE_PARENT/feat && gwtmux --rename feat2"
+  wait_for_dir_exists "$WORKTREE_PARENT/feat2"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+
+  # The shared branch is untouched and the colleague's commit is still reachable
+  run git -C "$REMOTE_REPO" branch
+  assert_output --partial "develop"
+  assert_output --partial "feat2"
+  run git -C "$REMOTE_REPO" branch --contains "$colleague_commit"
+  assert_output --partial "develop"
+
+  run tmux capture-pane -t "$wt_window" -p
+  assert_output --partial "kept origin/develop"
+
+  # The rename itself still happened
+  run git -C "$WORKTREE_PARENT/feat2" branch --show-current
+  assert_output "feat2"
+  run git -C "$WORKTREE_PARENT/feat2" rev-parse --abbrev-ref --symbolic-full-name @{u}
+  assert_output "origin/feat2"
+}
+
 @test "gwtmux --rename: to upstream branch name renames local only, remote untouched" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"

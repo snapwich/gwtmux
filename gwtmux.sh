@@ -551,7 +551,10 @@ RENAME MODE (--rename):
   Steps that already match <name> are skipped, so it is safe to use when
   the dir, branch, and remote branch names do not agree.
   Remote branch is only touched via the configured upstream; deleting the
-  old remote branch requires the latest commit to be authored by you.
+  old remote branch requires the latest commit to be authored by you and the
+  old remote branch to contain no commit that the renamed branch lacks. A
+  branch that tracks a differently named shared branch (say, one created with
+  "git checkout -b feat origin/develop") therefore keeps that branch.
 
 EXAMPLES:
   gwtmux feature/auth      Create worktree for feature/auth branch
@@ -1176,8 +1179,19 @@ EOF
         fi
         return 1
       fi
-      git push "$upstream_remote" --delete "$upstream_branch" ||
-        echo >&2 "Warning: could not delete $upstream_remote/$upstream_branch (may already be deleted)"
+      # The old remote branch is only this branch's own remote side when its tip
+      # is already contained in the renamed branch. A branch created with
+      # "git checkout -b feat origin/develop" tracks origin/develop, and
+      # deleting that drops a SHARED branch the user never named - the
+      # author-of-the-latest-commit guard above cannot see it, because it
+      # inspects the local branch instead. Containment is the test that keeps
+      # the delete from ever losing a commit.
+      if git merge-base --is-ancestor "refs/remotes/$upstream_remote/$upstream_branch" HEAD 2>/dev/null; then
+        git push "$upstream_remote" --delete "$upstream_branch" ||
+          echo >&2 "Warning: could not delete $upstream_remote/$upstream_branch (may already be deleted)"
+      else
+        echo >&2 "Warning: kept $upstream_remote/$upstream_branch - it has commits that '$new_name' does not, so it is not this branch's remote side"
+      fi
       git branch -u "$upstream_remote/$new_name" || return $?
     fi
 
