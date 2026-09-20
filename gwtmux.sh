@@ -207,6 +207,58 @@ _gwtmux_check_unique_basename() {
   return 1
 }
 
+# Resolve the branch to switch to before deleting the branch that a main repo
+# root has checked out. Starts from the same cascade the merge check uses
+# (origin/HEAD, then origin/main, origin/master, then literal "main"), then
+# gates the answer on a local branch of that name existing: a merge check can
+# tolerate a fictional "main", a checkout cannot.
+# Args: <git_root>
+_gwtmux_primary_branch() {
+  local git_root="$1" primary
+
+  primary="$(git -C "$git_root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+  if [[ -z "$primary" ]]; then
+    if git -C "$git_root" show-ref --verify --quiet refs/remotes/origin/main; then
+      primary="main"
+    elif git -C "$git_root" show-ref --verify --quiet refs/remotes/origin/master; then
+      primary="master"
+    else
+      primary="main" # ultimate fallback
+    fi
+  fi
+
+  if ! git -C "$git_root" show-ref --verify --quiet "refs/heads/$primary"; then
+    if git -C "$git_root" show-ref --verify --quiet refs/heads/main; then
+      primary="main"
+    elif git -C "$git_root" show-ref --verify --quiet refs/heads/master; then
+      primary="master"
+    else
+      echo >&2 "Error: cannot determine primary branch to switch to (no local main or master)."
+      return 1
+    fi
+  fi
+
+  echo "$primary"
+}
+
+# Refuse to switch away from a branch while the working tree has work in it:
+# the switch would carry the changes onto the primary branch. Untracked files
+# are exempt, they belong to no branch and survive the switch unchanged.
+# --ignore-submodules=dirty so a submodule with local work of its own does not
+# block the parent repo.
+# Args: <worktree_path>
+_gwtmux_check_clean_tree() {
+  local wt_path="$1"
+
+  if git -C "$wt_path" diff --quiet --ignore-submodules=dirty &&
+    git -C "$wt_path" diff --cached --quiet --ignore-submodules=dirty; then
+    return 0
+  fi
+
+  echo >&2 "Error: uncommitted changes — commit, stash, or discard before gwtmux -d<b|B>."
+  return 1
+}
+
 # Find worktrees nested under a given worktree path
 # Sets caller's _nested_worktrees array
 _gwtmux_find_nested_worktrees() {
@@ -363,12 +415,15 @@ EOF
     local delete_remote=0
     local -a worktree_names=()
 
+    # Declared outside the loop: zsh echoes a re-declared local that carries no
+    # assignment, so a second flag argument would print "i=1" to stdout.
+    local flags="" i=0
+
     while [[ $# -gt 0 ]]; do
       case "$1" in
       -*)
         # Handle combined flags like -dwbr or -dBrw
-        local flags="${1#-}"
-        local i
+        flags="${1#-}"
         for ((i = 0; i < ${#flags}; i++)); do
           case "${flags:$i:1}" in
           d)
@@ -441,11 +496,25 @@ EOF
       local branch="$(git branch --show-current)"
       local worktree_root="$(git rev-parse --show-toplevel)"
 
-      # Check if we're in a worktree only when doing destructive operations
-      if [[ $delete_worktree -eq 1 || $delete_local -gt 0 ]]; then
-        local git_dir="$(_gwtmux_git_dir_path --git-dir)"
-        if [[ "$git_dir" == "$git_common_dir" ]]; then
-          echo >&2 "Error: in main repo, not a worktree. Refusing to delete."
+      # The main repo root has no worktree to remove, so -w is still an error
+      # there, but -b/-B are not: the branch can go once the checkout steps off
+      # it. Keyed off the repo itself (--git-dir == --git-common-dir), not off
+      # the directory layout.
+      local git_dir="$(_gwtmux_git_dir_path --git-dir)"
+      local in_main_repo=0 switch_branch=""
+      [[ "$git_dir" == "$git_common_dir" ]] && in_main_repo=1
+
+      if [[ $in_main_repo -eq 1 && $delete_worktree -eq 1 ]]; then
+        echo >&2 "Error: in main repo, not a worktree. Refusing to delete."
+        return 1
+      fi
+
+      # Validate the switch before anything destructive runs: on a failure the
+      # branch and the checkout are both left exactly as they were.
+      if [[ $in_main_repo -eq 1 && -n "$branch" && $delete_local -gt 0 ]]; then
+        switch_branch="$(_gwtmux_primary_branch "$(dirname "$git_common_dir")")" || return 1
+        if [[ "$branch" == "$switch_branch" ]]; then
+          echo >&2 "Error: '$branch' is the primary branch. Refusing to delete."
           return 1
         fi
       fi
@@ -468,6 +537,11 @@ EOF
           echo >&2 "Error: branch '$branch' is not merged into '$default_branch'. Use -B to force delete."
           return 1
         fi
+      fi
+
+      # Last validation before the switch: the tree it moves has to be clean.
+      if [[ -n "$switch_branch" ]]; then
+        _gwtmux_check_clean_tree "$worktree_root" || return 1
       fi
 
       # Check for nested worktrees when deleting worktree directory
@@ -509,6 +583,12 @@ EOF
 
       # Delete local branch if requested
       if [[ -n "$branch" && $delete_local -gt 0 ]]; then
+        # The main repo root still has this branch checked out, so step off it
+        # first. Validated above: the tree is clean and this is not the primary.
+        if [[ -n "$switch_branch" ]]; then
+          git switch "$switch_branch" || return $?
+        fi
+
         if [[ $delete_local -eq 1 ]]; then
           # Safe delete (already validated above)
           git branch -d "$branch" || return $?
@@ -531,8 +611,10 @@ EOF
       if [[ -n "$TMUX" && -n "$gwt_window" ]]; then
         local window_count=$(tmux list-windows -t "$gwt_session" | wc -l)
         if [[ $window_count -eq 1 ]]; then
-          # Last window: navigate to parent and rename to shell name
-          cd ..
+          # Last window: rename to shell name instead of killing the session.
+          # The main repo root is never deleted, so its cwd is still valid and
+          # moving out of it would be gratuitous.
+          [[ $in_main_repo -eq 0 ]] && cd ..
           local shell_name=$(basename "${SHELL:-zsh}")
           tmux rename-window -t "$gwt_window" "$shell_name"
         else
@@ -551,6 +633,9 @@ EOF
       local -a worktree_paths=()
       local -a branch_names=()
       local -a window_names=()
+      # Empty unless this target is the main repo root, where the branch can
+      # only be deleted after the checkout steps off it (see below).
+      local -a switch_branches=()
 
       # Determine default branch for merge checking
       local default_branch="$(git -C "$git_root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
@@ -572,7 +657,7 @@ EOF
         # basename, then branch). Replaces the old guess of "sibling of the repo
         # root named after the branch", which could only ever find worktrees
         # laid out that way.
-        local wt_path resolve_rc=0
+        local wt_path="" resolve_rc=0
         wt_path="$(_gwtmux_resolve_worktree "$git_root" "$wt_name")" || resolve_rc=$?
         if [[ $resolve_rc -ne 0 ]]; then
           # rc 2 is an ambiguous name, already reported with its candidates
@@ -583,12 +668,23 @@ EOF
         # Get branch name for this worktree
         local wt_branch="$(git -C "$wt_path" branch --show-current 2>/dev/null)"
 
-        # Check if we're trying to delete main repo
-        if [[ $delete_worktree -eq 1 || $delete_local -gt 0 ]]; then
-          local wt_git_dir="$(_gwtmux_git_dir_path --git-dir "$wt_path")"
-          if [[ "$wt_git_dir" == "$git_common_dir" ]]; then
+        # The main repo root is not a worktree anyone can remove, so -w is an
+        # error on it, but -b/-B are not: the branch can go once the checkout
+        # steps off it. Keyed off the repo itself (--git-dir == --git-common-dir),
+        # not off the directory layout.
+        local wt_git_dir="$(_gwtmux_git_dir_path --git-dir "$wt_path")"
+        local wt_switch_branch=""
+        if [[ "$wt_git_dir" == "$git_common_dir" ]]; then
+          if [[ $delete_worktree -eq 1 ]]; then
             echo >&2 "Error: worktree '$wt_name' is the main repo. Refusing to delete."
             return 1
+          fi
+          if [[ -n "$wt_branch" && $delete_local -gt 0 ]]; then
+            wt_switch_branch="$(_gwtmux_primary_branch "$git_root")" || return 1
+            if [[ "$wt_branch" == "$wt_switch_branch" ]]; then
+              echo >&2 "Error: '$wt_branch' is the primary branch. Refusing to delete."
+              return 1
+            fi
           fi
         fi
 
@@ -600,9 +696,15 @@ EOF
           fi
         fi
 
+        # Last validation before the switch: the tree it moves has to be clean.
+        if [[ -n "$wt_switch_branch" ]]; then
+          _gwtmux_check_clean_tree "$wt_path" || return 1
+        fi
+
         # Store validated data
         worktree_paths+=("$wt_path")
         branch_names+=("$wt_branch")
+        switch_branches+=("$wt_switch_branch")
         # Same name normal mode gave the window when it opened this worktree
         window_names+=("$(_gwtmux_window_name "$wt_path" "$git_root" "$wt_branch")")
       done
@@ -646,6 +748,7 @@ EOF
         local wt_path="${worktree_paths[$idx]}"
         local branch="${branch_names[$idx]}"
         local window_name="${window_names[$idx]}"
+        local switch_branch="${switch_branches[$idx]}"
 
         # Remove worktree if requested
         if [[ $delete_worktree -eq 1 ]]; then
@@ -672,6 +775,15 @@ EOF
 
         # Delete local branch if requested
         if [[ -n "$branch" && $delete_local -gt 0 ]]; then
+          # The main repo root still has this branch checked out, so step off it
+          # first. Validated above: clean tree, and not the primary branch.
+          if [[ -n "$switch_branch" ]]; then
+            git -C "$wt_path" switch "$switch_branch" || {
+              echo >&2 "Error: failed to switch '$wt_path' to '$switch_branch'"
+              return 1
+            }
+          fi
+
           if [[ $delete_local -eq 1 ]]; then
             # Safe delete (already validated above)
             git -C "$git_root" branch -d "$branch" || {

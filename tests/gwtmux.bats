@@ -3164,3 +3164,216 @@ myrepo/existing"
   run get_tmux_windows
   assert_output --partial "myrepo/shared"
 }
+
+# ----------------------------------------------------------------------------
+# Done mode: the main repo root
+# ----------------------------------------------------------------------------
+
+@test "gwtmux -d: -dB in the main repo switches to the primary branch and deletes" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git checkout -b feature-x >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/default" -c "$MAIN_REPO" -P -F "#{window_id}")
+
+  send_cmd "$new_window" "cd $MAIN_REPO && gwtmux -dB"
+  wait_for_window_closed "myrepo/default"
+  wait_cmd_done
+
+  # Checkout moved to the primary branch, the branch itself is gone
+  run git -C "$MAIN_REPO" branch --show-current
+  assert_output "main"
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "feature-x"
+
+  refute tmux_window_exists "myrepo/default"
+}
+
+@test "gwtmux -d: -dw in the main repo errors and changes nothing" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git checkout -b feature-x >/dev/null 2>&1
+
+  local before_count="$(get_window_count)"
+  run gwtmux -d -w
+  assert_failure
+  assert_output --partial "in main repo, not a worktree"
+
+  # Aborted before anything destructive: branch, checkout and window intact
+  run git -C "$MAIN_REPO" branch --show-current
+  assert_output "feature-x"
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux -d: -dB in the main repo errors while on the primary branch" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  run gwtmux -dB
+  assert_failure
+  assert_output --partial "is the primary branch"
+
+  run git -C "$MAIN_REPO" branch --show-current
+  assert_output "main"
+}
+
+@test "gwtmux -d: -dB in the main repo errors on an uncommitted change" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git checkout -b feature-x >/dev/null 2>&1
+  echo "dirty" >>README.md
+
+  run gwtmux -dB
+  assert_failure
+  assert_output --partial "uncommitted changes"
+
+  run git -C "$MAIN_REPO" branch --show-current
+  assert_output "feature-x"
+  run git -C "$MAIN_REPO" branch
+  assert_output --partial "feature-x"
+}
+
+@test "gwtmux -d: -dB in the main repo ignores untracked files" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git checkout -b feature-x >/dev/null 2>&1
+  echo "scratch" >"$MAIN_REPO/untracked.txt"
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/default" -c "$MAIN_REPO" -P -F "#{window_id}")
+
+  send_cmd "$new_window" "cd $MAIN_REPO && gwtmux -dB"
+  wait_for_window_closed "myrepo/default"
+  wait_cmd_done
+
+  run git -C "$MAIN_REPO" branch --show-current
+  assert_output "main"
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "feature-x"
+
+  # Untracked files belong to no branch, so the switch leaves them alone
+  assert_file_exists "$MAIN_REPO/untracked.txt"
+}
+
+@test "gwtmux -d: -dbr in the main repo deletes the merged branch and its remote" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git checkout -b feature-x >/dev/null 2>&1
+  git push -u origin feature-x >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/default" -c "$MAIN_REPO" -P -F "#{window_id}")
+
+  send_cmd "$new_window" "cd $MAIN_REPO && gwtmux -dbr"
+  wait_for_window_closed "myrepo/default"
+  wait_cmd_done
+
+  run git -C "$MAIN_REPO" branch --show-current
+  assert_output "main"
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "feature-x"
+  run git -C "$MAIN_REPO" branch -r
+  refute_output --partial "origin/feature-x"
+}
+
+@test "gwtmux -d: -db in the main repo errors on an unmerged branch" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git checkout -b feature-x >/dev/null 2>&1
+  echo "work" >work.txt
+  git add work.txt
+  git commit -m "Unmerged commit" >/dev/null 2>&1
+
+  run gwtmux -db
+  assert_failure
+  assert_output --partial "not merged"
+
+  run git -C "$MAIN_REPO" branch --show-current
+  assert_output "feature-x"
+}
+
+@test "gwtmux -d: -dB in the main repo errors with no local main or master" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git checkout -b feature-x >/dev/null 2>&1
+  git branch -D main >/dev/null 2>&1
+
+  run gwtmux -dB
+  assert_failure
+  assert_output --partial "cannot determine primary branch"
+
+  run git -C "$MAIN_REPO" branch --show-current
+  assert_output "feature-x"
+}
+
+@test "gwtmux -d: bare -d in the main repo leaves the branch checked out" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git checkout -b feature-x >/dev/null 2>&1
+
+  local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/default" -c "$MAIN_REPO" -P -F "#{window_id}")
+
+  send_cmd "$new_window" "cd $MAIN_REPO && gwtmux -d"
+  wait_for_window_closed "myrepo/default"
+  wait_cmd_done
+
+  # Nothing was deleted, so nothing was switched either
+  run git -C "$MAIN_REPO" branch --show-current
+  assert_output "feature-x"
+}
+
+@test "gwtmux -d: -dB in the main repo keeps the cwd when renaming the last window" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git checkout -b feature-x >/dev/null 2>&1
+
+  # Ensure we only have one window
+  local window_count_before=$(get_window_count)
+  assert [ "$window_count_before" -eq 1 ]
+
+  local window_id=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  local expected_shell=$(basename "${SHELL:-zsh}")
+
+  send_cmd "$window_id" "cd $MAIN_REPO && gwtmux -dB"
+  wait_until "[ \"\$(tmux display-message -t '$window_id' -p '#W')\" = '$expected_shell' ]"
+  wait_cmd_done
+
+  # Renamed, not killed
+  assert_equal "$(get_window_count)" "1"
+  run tmux display-message -t "$window_id" -p '#W'
+  assert_output "$expected_shell"
+
+  # The main repo was never deleted, so the pane stays in it
+  run tmux display-message -t "$window_id" -p '#{pane_current_path}'
+  assert_output "$MAIN_REPO"
+
+  run git -C "$MAIN_REPO" branch --show-current
+  assert_output "main"
+}
+
+@test "gwtmux -d: -dB <name> switches and deletes when the name is the main repo" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git checkout -b feature-x >/dev/null 2>&1
+
+  run gwtmux -dB default
+  assert_success
+
+  run git -C "$MAIN_REPO" branch --show-current
+  assert_output "main"
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "feature-x"
+}
+
+@test "gwtmux -d: -dw <name> refuses the main repo and aborts the whole invocation" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/keeper" -b keeper main >/dev/null 2>&1
+
+  run gwtmux -dw keeper default
+  assert_failure
+  assert_output --partial "is the main repo"
+
+  # Validation runs before any deletion, so the valid name survives too
+  assert_dir_exists "$WORKTREE_PARENT/keeper"
+  assert_dir_exists "$MAIN_REPO"
+}
