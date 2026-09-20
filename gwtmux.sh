@@ -39,6 +39,41 @@ _gwtmux_git_dir_path() {
   (cd "$cwd" && cd "$dir" && pwd -P) 2>/dev/null
 }
 
+# Compute the tmux window name for a worktree. Single source of truth: every
+# naming site routes through here so one worktree always maps to one name.
+# Args: <worktree_path> [git_root] [branch]
+#   git_root defaults to the main repo root resolved from <worktree_path>
+#   branch   defaults to <worktree_path>'s current branch
+# Callers that name a worktree before creating it must pass both optional args,
+# since neither can be read from a path that does not exist yet.
+_gwtmux_window_name() {
+  local wt_path="$1" git_root="${2:-}" branch="${3:-}"
+  local git_common_dir parent_name resolved_path
+
+  if [[ -z "$git_root" ]]; then
+    git_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$wt_path")" || return 1
+    git_root="$(dirname -- "$git_common_dir")"
+  fi
+  parent_name="$(basename -- "$(dirname -- "$git_root")")"
+
+  resolved_path="$(cd "$wt_path" 2>/dev/null && pwd -P)"
+  [[ -z "$resolved_path" ]] && resolved_path="$wt_path"
+
+  # The main repo root is named after its own directory ("<parent>/default"),
+  # not after whatever branch happens to be checked out there.
+  if [[ "$resolved_path" == "$git_root" ]]; then
+    echo "$parent_name/$(basename -- "$git_root")"
+    return 0
+  fi
+
+  [[ -z "$branch" ]] && branch="$(git -C "$wt_path" branch --show-current 2>/dev/null)"
+  # Detached HEAD: there is no branch to name the window after, so use the
+  # directory basename instead of a trailing-slash name like "myrepo/".
+  [[ -z "$branch" ]] && branch="$(basename -- "$resolved_path")"
+
+  echo "$parent_name/$branch"
+}
+
 # Dependency check helper
 _gwtmux_check_deps() {
   local missing=()
@@ -381,7 +416,6 @@ EOF
       # e.g., if git_common_dir is /path/myrepo/default/.git, parent is /path/myrepo
       local git_root="$(dirname "$git_common_dir")"
       local parent_dir="$(dirname "$git_root")"
-      local repo_name="$(basename "$parent_dir")"
 
       # Arrays to store validated data
       local -a worktree_paths=()
@@ -437,9 +471,8 @@ EOF
         # Store validated data
         worktree_paths+=("$wt_path")
         branch_names+=("$wt_branch")
-        # Use branch name for window name to match normal mode behavior
-        # (in normal mode, window name is based on branch which equals the argument)
-        window_names+=("$repo_name/$wt_branch")
+        # Same name normal mode gave the window when it opened this worktree
+        window_names+=("$(_gwtmux_window_name "$wt_path" "$git_root" "$wt_branch")")
       done
 
       # Check for nested worktrees across all parents
@@ -597,7 +630,6 @@ EOF
 
     local worktree_root="$(git rev-parse --show-toplevel)"
     local parent_dir="$(dirname "$worktree_root")"
-    local repo_name="$(basename "$parent_dir")"
 
     # Convert slashes to underscores like gwtmux does
     local dir_new_name="${new_name//\//_}"
@@ -665,7 +697,7 @@ EOF
     fi
 
     # Update tmux window
-    tmux rename-window -t "$gwt_window" "$repo_name/$new_name"
+    tmux rename-window -t "$gwt_window" "$(_gwtmux_window_name "$new_path" "" "$new_name")"
     ;;
 
   normal)
@@ -698,18 +730,11 @@ EOF
       fi
 
       $git_cmd -C "$PWD/default" fetch --prune --no-recurse-submodules --quiet
-      local repo_name="$(basename "$PWD")"
 
       while IFS= read -r worktree_path; do
         # Only process worktrees in current directory
         if [[ "$(dirname -- "$worktree_path")" == "$PWD" ]]; then
-          local window_name
-          if [[ "$worktree_path" == "$PWD/default" ]]; then
-            window_name="$repo_name/default"
-          else
-            local branch_name="$($git_cmd -C "$worktree_path" branch --show-current 2>/dev/null)"
-            window_name="$repo_name/$branch_name"
-          fi
+          local window_name="$(_gwtmux_window_name "$worktree_path")"
           if [[ -n "$window_name" ]]; then
             # Check if window already exists
             if [[ -z "$(_gwtmux_window_id_by_name "$gwt_session" "$window_name")" ]]; then
@@ -745,10 +770,8 @@ EOF
       $git_cmd -C "$git_root" fetch -a
     fi
 
-    local repo_name=""
     local default_branch=""
     if [[ $has_git_root -eq 1 ]]; then
-      repo_name="$(basename "$(dirname -- "$git_root")")"
       default_branch="$(
         $git_cmd -C "$git_root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null |
           sed 's|^origin/||'
@@ -766,7 +789,6 @@ EOF
 
     # Save original git context for restoring per-iteration
     local orig_git_root="$git_root"
-    local orig_repo_name="$repo_name"
     local orig_default_branch="$default_branch"
     local orig_has_git_root="$has_git_root"
 
@@ -774,7 +796,7 @@ EOF
     local success_count=0
 
     # Declare loop variables outside the loop to avoid re-declaration issues
-    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched pr_branch arg_parent arg_basename resolved_parent repo_parent_candidate path_matched path_repo_name resolved_path path_git_common_dir path_git_root existing_window_id
+    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched pr_branch arg_parent arg_basename resolved_parent repo_parent_candidate path_matched resolved_path existing_window_id
 
     # Save original directory for resolving relative args after cd
     local orig_pwd="$PWD"
@@ -787,26 +809,18 @@ EOF
 
       # Restore git context for each iteration
       git_root="$orig_git_root"
-      repo_name="$orig_repo_name"
       default_branch="$orig_default_branch"
       has_git_root="$orig_has_git_root"
       repo_path_matched=0
 
       # Check if argument is a path to an existing worktree (can be any repo)
       path_matched=0
-      path_repo_name=""
       if [[ "$arg" == /* || "$arg" == .* || "$arg" == */* ]]; then
         if [[ -d "$arg" ]]; then
           resolved_path="$(cd "$arg" 2>/dev/null && pwd -P)"
           if [[ -n "$resolved_path" ]] && $git_cmd -C "$resolved_path" rev-parse --git-dir &>/dev/null; then
-            # It's a git directory - use directory name as branch label
-            branch="$(basename "$resolved_path")"
-            # Get repo name from this path's git structure
-            path_git_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$resolved_path")"
-            if [[ -n "$path_git_common_dir" ]]; then
-              path_git_root="$(dirname -- "$path_git_common_dir")"
-              path_repo_name="$(basename "$(dirname "$path_git_root")")"
-            fi
+            # It's a git directory - the window name comes from the path
+            # itself, so no branch resolution is needed
             worktree_path="$resolved_path"
             worktree_exists=1
             path_matched=1
@@ -838,7 +852,6 @@ EOF
             # Override git context for this iteration
             git_root="$resolved_parent/default"
             has_git_root=1
-            repo_name="$(basename "$resolved_parent")"
             $git_cmd -C "$git_root" fetch -a 2>/dev/null || true
             # Compute default_branch for this repo
             default_branch="$(
@@ -876,22 +889,6 @@ EOF
         [[ -z "$branch" ]] && branch="$arg"
       fi
 
-      # Use path's repo name if available, otherwise current repo
-      if [[ -n "$path_repo_name" ]]; then
-        window_name="$path_repo_name/$branch"
-      else
-        window_name="$repo_name/$branch"
-      fi
-
-      # If window already exists, just select it (by id - name targets are
-      # prefix/fuzzy matched by tmux and can hit the wrong window)
-      existing_window_id="$(_gwtmux_window_id_by_name "$gwt_session" "$window_name")"
-      if [[ -n "$existing_window_id" ]]; then
-        tmux select-window -t "$existing_window_id"
-        success_count=$((success_count + 1))
-        continue
-      fi
-
       # Only compute worktree path if we didn't already match a path
       if [[ $path_matched -eq 0 ]]; then
         dir_branch="${branch//\//_}"
@@ -902,6 +899,23 @@ EOF
           grep -Fxq -- "$worktree_path"; then
           worktree_exists=1
         fi
+      fi
+
+      # Name the window. A worktree that does not exist yet cannot be read, so
+      # pass its repo root and branch along.
+      if [[ $path_matched -eq 1 ]]; then
+        window_name="$(_gwtmux_window_name "$worktree_path")"
+      else
+        window_name="$(_gwtmux_window_name "$worktree_path" "$git_root" "$branch")"
+      fi
+
+      # If window already exists, just select it (by id - name targets are
+      # prefix/fuzzy matched by tmux and can hit the wrong window)
+      existing_window_id="$(_gwtmux_window_id_by_name "$gwt_session" "$window_name")"
+      if [[ -n "$existing_window_id" ]]; then
+        tmux select-window -t "$existing_window_id"
+        success_count=$((success_count + 1))
+        continue
       fi
 
       # Create worktree if it doesn't exist

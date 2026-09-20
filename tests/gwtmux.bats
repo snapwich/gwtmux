@@ -634,6 +634,70 @@ myrepo/existing"
 }
 
 # ----------------------------------------------------------------------------
+# Window naming: detached HEAD
+# ----------------------------------------------------------------------------
+
+@test "gwtmux: names detached HEAD worktree window after its directory" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  # Worktree with no current branch
+  local commit_hash=$(git -C "$MAIN_REPO" rev-parse HEAD)
+  git worktree add --detach "$WORKTREE_PARENT/detached-wt" "$commit_hash" >/dev/null 2>&1
+
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux $WORKTREE_PARENT/detached-wt"
+  wait_for_window_exists "myrepo/detached-wt"
+  wait_cmd_done
+
+  run get_tmux_windows
+  assert_output --partial "myrepo/detached-wt"
+  # Not the trailing-slash name an empty branch used to produce
+  refute tmux_window_exists "myrepo/"
+}
+
+@test "gwtmux: no args names detached HEAD worktree after its directory" {
+  setup_worktree_structure "myrepo"
+  cd "$WORKTREE_PARENT"
+
+  local commit_hash=$(git -C "$MAIN_REPO" rev-parse HEAD)
+  git -C default worktree add -b feature-1 "$WORKTREE_PARENT/feature-1" main >/dev/null 2>&1
+  git -C default worktree add --detach "$WORKTREE_PARENT/detached-wt" "$commit_hash" >/dev/null 2>&1
+
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux"
+  wait_for_window_exists "myrepo/detached-wt"
+  wait_cmd_done
+
+  run get_tmux_windows
+  assert_output --partial "myrepo/default"
+  assert_output --partial "myrepo/feature-1"
+  assert_output --partial "myrepo/detached-wt"
+  refute tmux_window_exists "myrepo/"
+}
+
+@test "gwtmux -d: closes window of detached HEAD worktree" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  local commit_hash=$(git -C "$MAIN_REPO" rev-parse HEAD)
+  git worktree add --detach "$WORKTREE_PARENT/detached-wt" "$commit_hash" >/dev/null 2>&1
+
+  # Run from the session's first window, so the new window stays untouched
+  local main_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/detached-wt" -c "$WORKTREE_PARENT/detached-wt" >/dev/null 2>&1
+
+  run get_tmux_windows
+  assert_output --partial "myrepo/detached-wt"
+
+  send_cmd "$main_window" "cd $MAIN_REPO && gwtmux -dw detached-wt"
+  wait_for_window_closed "myrepo/detached-wt"
+  wait_cmd_done
+
+  run get_tmux_windows
+  refute_output --partial "myrepo/detached-wt"
+  refute [ -d "$WORKTREE_PARENT/detached-wt" ]
+}
+
+# ----------------------------------------------------------------------------
 # Multi-worktree mode (no arguments)
 # ----------------------------------------------------------------------------
 
