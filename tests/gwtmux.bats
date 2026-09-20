@@ -3758,10 +3758,41 @@ EOF
 
   send_cmd "$first_window" "cd $TEST_TEMP_DIR && gwtmux $FLAT_REPO"
   wait_cmd_done
+  # An outright failure also leaves the window count alone, so the count means
+  # nothing unless gwtmux succeeded.
+  assert_equal "$(cat "$CMD_MARKER")" "0"
 
   assert_equal "$(get_window_count)" "$before_count"
 }
 
+# D19: flat mode never fetches. The path-argument tests below cannot prove this
+# on their own - a path argument suppresses the pre-loop fetch in either layout,
+# so deleting the flat-repo half of the guard leaves them green. Only a
+# non-path argument reaches the flat half, and the refusal for it comes after
+# the pre-loop fetch, so the fetch is observable.
+@test "gwtmux: refuses a branch in a flat repo without fetching origin first" {
+  setup_flat_repo "j2"
+  stub_gh_fail
+
+  # A branch that exists on origin and has never been fetched here. Any fetch
+  # would create its remote-tracking ref, so the ref's absence afterwards is
+  # proof that no fetch ran.
+  git -C "$FLAT_REPO" push -q origin main:remote-only
+  git -C "$FLAT_REPO" update-ref -d refs/remotes/origin/remote-only
+  refute git -C "$FLAT_REPO" show-ref --verify --quiet refs/remotes/origin/remote-only
+
+  send_cmd "$TEST_SESSION" "cd $FLAT_REPO && gwtmux feature-x >$TEST_TEMP_DIR/out 2>&1"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "1"
+
+  run cat "$TEST_TEMP_DIR/out"
+  assert_output --partial "'$FLAT_REPO' is a flat repo"
+
+  refute git -C "$FLAT_REPO" show-ref --verify --quiet refs/remotes/origin/remote-only
+}
+
+# Proves the unreachable remote costs nothing here; it does NOT prove the
+# flat-repo half of the no-fetch guard (see the test above).
 @test "gwtmux: opens a flat repo path without fetching from an unreachable origin" {
   setup_flat_repo "j2"
   git -C "$FLAT_REPO" remote set-url origin "$TEST_TEMP_DIR/gone.git"
