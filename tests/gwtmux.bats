@@ -3245,6 +3245,36 @@ myrepo/existing"
   run git -C "$REMOTE_REPO" branch
   assert_output --partial "nested"
 }
+
+@test "gwtmux -dwB: refuses to discard uncommitted work in a nested worktree" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/parent-wt" -b parent-wt main >/dev/null 2>&1
+  git worktree add "$WORKTREE_PARENT/parent-wt/nested" -b nested main >/dev/null 2>&1
+
+  # Uncommitted work in the nested worktree. -B is about branches, not files.
+  echo "dirty" >>"$WORKTREE_PARENT/parent-wt/nested/README.md"
+  echo "scratch" >"$WORKTREE_PARENT/parent-wt/nested/scratch.txt"
+
+  local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$WORKTREE_PARENT" -P -F "#{window_id}")
+  send_cmd "$runner" "cd $WORKTREE_PARENT && gwtmux -dwB parent-wt"
+  confirm_nested_worktree_removal "$runner"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "1"
+
+  run tmux capture-pane -t "$runner" -p
+  assert_output --partial "failed to remove nested worktree"
+
+  # Both files still there, and the parent worktree untouched
+  assert_file_exists "$WORKTREE_PARENT/parent-wt/nested/scratch.txt"
+  run cat "$WORKTREE_PARENT/parent-wt/nested/README.md"
+  assert_output --partial "dirty"
+  assert_dir_exists "$WORKTREE_PARENT/parent-wt"
+  run git -C "$MAIN_REPO" branch
+  assert_output --partial "parent-wt"
+  assert_output --partial "nested"
+}
 # ----------------------------------------------------------------------------
 # Done mode: worktree name resolution
 # ----------------------------------------------------------------------------

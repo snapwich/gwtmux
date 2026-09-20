@@ -425,13 +425,16 @@ _gwtmux_remove_nested_worktrees() {
   shift 3
   _gwtmux_nested_failure=0
 
-  local nwt_path nwt_branch force_flag
+  local nwt_path nwt_branch
   for nwt_path in "$@"; do
     nwt_branch="$(git -C "$nwt_path" branch --show-current 2>/dev/null)"
 
-    force_flag=""
-    [[ $delete_local -eq 2 ]] && force_flag="--force"
-    git -C "$git_root" worktree remove $force_flag "$nwt_path" || {
+    # No --force, ever. "-B" is documented as "force delete local branch (even
+    # if unmerged)" and says nothing about files: with --force here, "-dwB"
+    # silently discarded uncommitted and untracked files in nested worktrees,
+    # while the parent worktree - removed without --force a few lines below -
+    # kept them. Let git refuse, and abort the whole operation.
+    git -C "$git_root" worktree remove "$nwt_path" || {
       echo >&2 "Error: failed to remove nested worktree '$nwt_path'"
       return 1
     }
