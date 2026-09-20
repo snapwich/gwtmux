@@ -1038,37 +1038,41 @@ EOF
     fi
 
     if [[ $# -eq 0 ]]; then
-      # Flat repo: open a window for the repo itself plus one per worktree,
-      # wherever those live. Keyed on the repo the current directory belongs to
-      # (so a subdirectory or one of the worktrees works too), never on what the
-      # current directory happens to contain: a plain directory full of repos
-      # still falls through to the convention check below. No fetch - flat mode
-      # creates nothing and resolves no branch from a remote.
-      local noarg_common_dir="" noarg_root=""
-      if noarg_common_dir="$(_gwtmux_git_dir_path --git-common-dir)" &&
-        noarg_root="$(dirname -- "$noarg_common_dir")" &&
-        _gwtmux_is_flat "$noarg_root"; then
-        # Declared before the loop: zsh echoes a re-declared local that carries
-        # no assignment.
-        local flat_wt_path="" flat_wt_branch="" flat_window_name=""
-        while IFS=$'\t' read -r flat_wt_path flat_wt_branch; do
-          [[ -z "$flat_wt_path" ]] && continue
-          flat_window_name="$(_gwtmux_window_name "$flat_wt_path" "$noarg_root" "$flat_wt_branch")"
-          [[ -z "$flat_window_name" ]] && continue
-          if [[ -z "$(_gwtmux_window_id_by_name "$gwt_session" "$flat_window_name")" ]]; then
-            tmux new-window -t "$gwt_session" -n "$flat_window_name" -c "$flat_wt_path"
-          fi
-        done < <(_gwtmux_worktree_list "$noarg_root")
-
-        # Kill original zsh window if it was single pane
-        if [[ $can_reuse_window -eq 1 ]]; then
-          tmux kill-window -t "$current_window_id"
-        fi
-        return 0
-      fi
-
-      # Multi-worktree mode - only works from ../default
+      # Convention mode is decided first, on "$PWD/default is a repo". Testing
+      # flat-ness first would key the dispatch on whatever repo the current
+      # directory belongs to - including an ANCESTOR repo (a dotfiles repo at
+      # ~, a monorepo above ~/repos) - and open that repo's worktrees instead
+      # of the convention repo standing right here.
       if ! $git_cmd -C "$PWD/default" rev-parse --git-dir &>/dev/null; then
+        # Flat repo: open a window for the repo itself plus one per worktree,
+        # wherever those live. Keyed on the repo the current directory belongs
+        # to, so a subdirectory of it or one of its worktrees works too. No
+        # fetch - flat mode creates nothing and resolves no branch from a
+        # remote.
+        local noarg_common_dir="" noarg_root=""
+        if noarg_common_dir="$(_gwtmux_git_dir_path --git-common-dir)" &&
+          noarg_root="$(dirname -- "$noarg_common_dir")" &&
+          _gwtmux_is_flat "$noarg_root"; then
+          # Declared before the loop: zsh echoes a re-declared local that
+          # carries no assignment.
+          local flat_wt_path="" flat_wt_branch="" flat_window_name=""
+          while IFS=$'\t' read -r flat_wt_path flat_wt_branch; do
+            [[ -z "$flat_wt_path" ]] && continue
+            flat_window_name="$(_gwtmux_window_name "$flat_wt_path" "$noarg_root" "$flat_wt_branch")"
+            [[ -z "$flat_window_name" ]] && continue
+            if [[ -z "$(_gwtmux_window_id_by_name "$gwt_session" "$flat_window_name")" ]]; then
+              tmux new-window -t "$gwt_session" -n "$flat_window_name" -c "$flat_wt_path"
+            fi
+          done < <(_gwtmux_worktree_list "$noarg_root")
+
+          # Kill original zsh window if it was single pane
+          if [[ $can_reuse_window -eq 1 ]]; then
+            tmux kill-window -t "$current_window_id"
+          fi
+          return 0
+        fi
+
+        # Neither layout: not a flat repo and no "default/" here.
         echo >&2 "Error: branch or PR number required"
         return 1
       fi

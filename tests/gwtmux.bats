@@ -168,6 +168,24 @@ setup_flat_repo() {
   git -C "$FLAT_REPO" remote set-head origin main >/dev/null 2>&1
 }
 
+# Setup a git repo that CONTAINS other repos, the way a dotfiles repo in $HOME
+# or a monorepo above ~/repos does. Nothing below it is tracked; it exists so
+# that the repo resolver can reach it from any directory underneath, which is
+# what made no-arg mode pick the wrong repo. Its own worktree gives the windows
+# it must NOT open a name to assert against ("ancestor", "ancestor/ancestor-wt").
+setup_ancestor_repo() {
+  ANCESTOR_REPO="$TEST_TEMP_DIR/ancestor"
+  mkdir -p "$ANCESTOR_REPO"
+  git init "$ANCESTOR_REPO" >/dev/null 2>&1
+  git -C "$ANCESTOR_REPO" config user.name "Test User"
+  git -C "$ANCESTOR_REPO" config user.email "test@example.com"
+  echo "dotfiles" >"$ANCESTOR_REPO/profile"
+  git -C "$ANCESTOR_REPO" add profile
+  git -C "$ANCESTOR_REPO" commit -m "Initial commit" >/dev/null 2>&1
+  git -C "$ANCESTOR_REPO" worktree add -b ancestor-wt \
+    "$TEST_TEMP_DIR/ancestor-wt" >/dev/null 2>&1
+}
+
 # Create a fake gh command that returns a PR branch name
 stub_gh_pr() {
   local pr_number="$1"
@@ -3584,6 +3602,56 @@ EOF
   run gwtmux
   assert_failure
   assert_output --partial "branch or PR number required"
+}
+
+@test "gwtmux: no args in a convention parent under an ancestor repo stays convention" {
+  setup_worktree_structure "myrepo"
+  setup_ancestor_repo
+
+  # Move the whole convention parent under the ancestor repo, before any
+  # worktree of it exists, so no worktree administrative path goes stale.
+  # Step out of it first: setup leaves the cwd inside the directory that moves.
+  cd "$TEST_TEMP_DIR"
+  mkdir -p "$ANCESTOR_REPO/repos"
+  mv "$WORKTREE_PARENT" "$ANCESTOR_REPO/repos/myrepo"
+  WORKTREE_PARENT="$ANCESTOR_REPO/repos/myrepo"
+  MAIN_REPO="$WORKTREE_PARENT/default"
+  git -C "$MAIN_REPO" worktree add -b feature-1 "$WORKTREE_PARENT/feature-1" main >/dev/null 2>&1
+
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux"
+  wait_for_window_exists "myrepo/feature-1"
+  # The reusable shell window is killed, so the marker can never be written:
+  # wait_cmd_done finishes on the pane disappearing instead.
+  wait_cmd_done
+
+  # The repo standing right here wins, not the one the cwd happens to belong to
+  assert tmux_window_exists "myrepo/default"
+  assert tmux_window_exists "myrepo/feature-1"
+  refute tmux_window_exists "ancestor"
+  refute tmux_window_exists "ancestor/ancestor-wt"
+}
+
+@test "gwtmux: no args inside a flat repo under an ancestor repo opens the inner repo" {
+  setup_flat_repo "j2"
+  setup_ancestor_repo
+
+  mv "$FLAT_PARENT" "$ANCESTOR_REPO/flat"
+  FLAT_PARENT="$ANCESTOR_REPO/flat"
+  FLAT_REPO="$FLAT_PARENT/j2"
+  git -C "$FLAT_REPO" worktree add "$FLAT_PARENT/j2-work" -b work main >/dev/null 2>&1
+
+  local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$TEST_TEMP_DIR" -P -F "#{window_id}")
+
+  send_cmd "$runner" "cd $FLAT_REPO && gwtmux"
+  wait_for_window_exists "j2/j2-work"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+
+  # The innermost repo, not the ancestor the resolver could also reach
+  assert tmux_window_exists "j2"
+  assert tmux_window_exists "j2/j2-work"
+  refute tmux_window_exists "ancestor"
+  refute tmux_window_exists "ancestor/ancestor-wt"
 }
 
 @test "gwtmux: selects the existing window of a flat repo instead of a second one" {
