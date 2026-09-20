@@ -567,6 +567,9 @@ teardown() {
   send_cmd "$first_window" "cd $MAIN_REPO && gwtmux existing"
   wait_for_window_exists "myrepo/existing"
   wait_cmd_done
+  # Without this the claim holds just as well when gwtmux fails outright: a
+  # command that does nothing also creates no duplicate window.
+  assert_equal "$(cat "$CMD_MARKER")" "0"
 
   # Should have selected the window (not created a duplicate)
   run get_tmux_windows
@@ -2236,8 +2239,11 @@ myrepo/existing"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
   wait_cmd_done
 
-  # Should complete without error
+  # Should complete without error. No marker to check - gwtmux kills its own
+  # window - so the window being gone stands in for the exit code: a gwtmux that
+  # stopped on the missing remote ref would leave it open.
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
+  refute tmux_window_exists "myrepo/test-branch"
 }
 
 # ----------------------------------------------------------------------------
@@ -3036,6 +3042,10 @@ myrepo/existing"
   wait_cmd_done
 
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
+  # gwtmux kills its own window last, so no exit-code marker is ever written.
+  # The window being gone is what says it ran to the end instead of stopping on
+  # a prompt it should never have printed.
+  refute tmux_window_exists "myrepo/test-wt"
 }
 
 @test "gwtmux -d: removes nested worktrees with detached HEAD" {
@@ -3452,6 +3462,10 @@ myrepo/existing"
   send_cmd "$new_window" "cd $MAIN_REPO && gwtmux -d"
   wait_for_window_closed "myrepo/default"
   wait_cmd_done
+  # gwtmux kills its own window here, so no exit-code marker is ever written.
+  # Assert the window is really gone: otherwise a gwtmux that failed before
+  # doing anything would satisfy the branch assertion below too.
+  refute tmux_window_exists "myrepo/default"
 
   # Nothing was deleted, so nothing was switched either
   run git -C "$MAIN_REPO" branch --show-current
@@ -3850,6 +3864,9 @@ EOF
   send_cmd "$new_window" "cd $FLAT_REPO && gwtmux -d"
   wait_for_window_closed "j2"
   wait_cmd_done
+  # No marker: gwtmux kills its own window. Assert the close happened, or a
+  # gwtmux that failed immediately would pass the branch assertion below.
+  refute tmux_window_exists "j2"
 
   # Nothing was deleted, so nothing was switched either
   run git -C "$FLAT_REPO" branch --show-current
