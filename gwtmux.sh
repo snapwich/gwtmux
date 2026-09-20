@@ -61,6 +61,22 @@ _gwtmux_is_flat() {
   [[ "$(basename -- "$1")" != "default" ]]
 }
 
+# Tell whether a directory is the root of a main git repo, rather than merely
+# some directory that lies inside one. "git rev-parse --git-dir" answers yes for
+# every directory under a repo, so probing "<dir>/default" with it called any
+# repo that happens to contain a subdirectory named "default" a convention repo.
+# A worktree root is not a main repo root either: --git-common-dir points at the
+# main repo, which is what the convention layout means by "<parent>/default".
+# Args: <dir>
+_gwtmux_is_repo_root() {
+  local dir="$1" common_dir resolved
+  [[ -d "$dir" ]] || return 1
+  common_dir="$(_gwtmux_git_dir_path --git-common-dir "$dir")" || return 1
+  resolved="$(cd "$dir" 2>/dev/null && pwd -P)" || return 1
+  [[ -n "$resolved" ]] || return 1
+  [[ "$(dirname -- "$common_dir")" == "$resolved" ]]
+}
+
 # Decide whether a normal-mode argument names a path instead of a branch, by
 # the same rule the argument loop applies: explicitly path-shaped ("/...",
 # "./...", "../...", "." or "..") or the root of an existing worktree. A name
@@ -1096,12 +1112,15 @@ EOF
     fi
 
     if [[ $# -eq 0 ]]; then
-      # Convention mode is decided first, on "$PWD/default is a repo". Testing
-      # flat-ness first would key the dispatch on whatever repo the current
-      # directory belongs to - including an ANCESTOR repo (a dotfiles repo at
-      # ~, a monorepo above ~/repos) - and open that repo's worktrees instead
-      # of the convention repo standing right here.
-      if ! $git_cmd -C "$PWD/default" rev-parse --git-dir &>/dev/null; then
+      # Convention mode is decided first, on "$PWD/default is a repo ROOT".
+      # Testing flat-ness first would key the dispatch on whatever repo the
+      # current directory belongs to - including an ANCESTOR repo (a dotfiles
+      # repo at ~, a monorepo above ~/repos) - and open that repo's worktrees
+      # instead of the convention repo standing right here. The root test is
+      # what makes it a convention repo: "rev-parse --git-dir" also succeeds for
+      # a plain subdirectory named "default", which sent any repo carrying one
+      # down a convention branch that matched none of its worktrees.
+      if ! _gwtmux_is_repo_root "$PWD/default"; then
         # Flat repo: open a window for the repo itself plus one per worktree,
         # wherever those live. Keyed on the repo the current directory belongs
         # to, so a subdirectory of it or one of its worktrees works too. No
@@ -1114,16 +1133,24 @@ EOF
           # Declared before the loop: zsh echoes a re-declared local that
           # carries no assignment.
           local flat_wt_path="" flat_wt_branch="" flat_window_name=""
+          local flat_matched=0
           while IFS=$'\t' read -r flat_wt_path flat_wt_branch; do
             [[ -z "$flat_wt_path" ]] && continue
             flat_window_name="$(_gwtmux_window_name "$flat_wt_path" "$noarg_root" "$flat_wt_branch")"
             [[ -z "$flat_window_name" ]] && continue
+            flat_matched=$((flat_matched + 1))
             if [[ -z "$(_gwtmux_window_id_by_name "$gwt_session" "$flat_window_name")" ]]; then
               tmux new-window -t "$gwt_session" -n "$flat_window_name" -c "$flat_wt_path"
             fi
           done < <(_gwtmux_worktree_list "$noarg_root")
 
-          # Kill original zsh window if it was single pane
+          # Kill the original shell window only once this repo actually has a
+          # window to move to. Killing it after matching nothing took the whole
+          # tmux session down with it whenever it was the only window.
+          if [[ $flat_matched -eq 0 ]]; then
+            echo >&2 "Error: no worktrees found for '$noarg_root'"
+            return 1
+          fi
           if [[ $can_reuse_window -eq 1 ]]; then
             tmux kill-window -t "$current_window_id"
           fi
@@ -1142,12 +1169,14 @@ EOF
       # home). Comparing the two matched nothing under any symlinked ancestor:
       # no window was opened, and the shell window was killed anyway.
       local pwd_physical="$(pwd -P)"
+      local noarg_matched=0
 
       while IFS= read -r worktree_path; do
         # Only process worktrees in current directory
         if [[ "$(dirname -- "$worktree_path")" == "$pwd_physical" ]]; then
           local window_name="$(_gwtmux_window_name "$worktree_path")"
           if [[ -n "$window_name" ]]; then
+            noarg_matched=$((noarg_matched + 1))
             # Check if window already exists
             if [[ -z "$(_gwtmux_window_id_by_name "$gwt_session" "$window_name")" ]]; then
               tmux new-window -t "$gwt_session" -n "$window_name" -c "$worktree_path"
@@ -1156,7 +1185,13 @@ EOF
         fi
       done < <($git_cmd -C "$PWD/default" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}')
 
-      # Kill original zsh window if it was single pane
+      # Kill the original shell window only once there is a window to move to.
+      # Matching nothing and killing anyway destroyed the session whenever this
+      # was its only window.
+      if [[ $noarg_matched -eq 0 ]]; then
+        echo >&2 "Error: no worktrees found in '$pwd_physical'"
+        return 1
+      fi
       if [[ $can_reuse_window -eq 1 ]]; then
         tmux kill-window -t "$current_window_id"
       fi

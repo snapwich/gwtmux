@@ -4225,3 +4225,57 @@ setup_submodule() {
   run git -C "$SUBMODULE_DIR" branch --show-current
   assert_output "sub-feature"
 }
+
+# ----------------------------------------------------------------------------
+# No-arg dispatch: "$PWD/default" has to be a repo ROOT, not just a directory
+# inside some repo
+# ----------------------------------------------------------------------------
+
+# "git rev-parse --git-dir" succeeds for every directory under a repo, so a repo
+# that merely contained a plain subdirectory named "default" was read as a
+# convention repo. The convention loop then matched none of its worktrees -
+# their parent is the repo's parent, never $PWD - opened no window, and killed
+# the reusable shell window anyway, taking the whole session with it.
+@test "gwtmux: no args in a flat repo holding a plain default/ subdir opens the repo" {
+  setup_flat_repo "j2"
+  mkdir -p "$FLAT_REPO/default"
+  echo "cfg" >"$FLAT_REPO/default/cfg"
+  git -C "$FLAT_REPO" add default/cfg >/dev/null 2>&1
+  git -C "$FLAT_REPO" commit -m "add default dir" >/dev/null 2>&1
+  git -C "$FLAT_REPO" worktree add "$FLAT_PARENT/j2-work" -b work main >/dev/null 2>&1
+
+  local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$TEST_TEMP_DIR" -P -F "#{window_id}")
+
+  send_cmd "$runner" "cd $FLAT_REPO && gwtmux"
+  wait_for_window_exists "j2/j2-work"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+
+  assert tmux_window_exists "j2"
+  assert tmux_window_exists "j2/j2-work"
+  # The session is still here: nothing was killed after matching nothing
+  assert tmux has-session -t "$TEST_SESSION"
+}
+
+# Second reachable shape of the same probe: a plain directory holding a non-repo
+# "default/", sitting under a git repo. The directory is a subdirectory of that
+# repo, so D13 answers it - open the repo it belongs to. What the "default/"
+# name used to do instead was send gwtmux down the convention branch, which
+# matched nothing, opened nothing, and killed the shell window anyway.
+@test "gwtmux: no args in a subdir holding a non-repo default/ opens the repo it belongs to" {
+  setup_ancestor_repo
+  mkdir -p "$ANCESTOR_REPO/proj/default"
+  echo "notarepo" >"$ANCESTOR_REPO/proj/default/file"
+
+  local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$TEST_TEMP_DIR" -P -F "#{window_id}")
+
+  send_cmd "$runner" "cd $ANCESTOR_REPO/proj && gwtmux"
+  wait_for_window_exists "ancestor/ancestor-wt"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+
+  assert tmux_window_exists "ancestor"
+  assert tmux_window_exists "ancestor/ancestor-wt"
+  assert tmux has-session -t "$TEST_SESSION"
+}
+
