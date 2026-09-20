@@ -620,7 +620,11 @@ EOF
           fi
         fi
 
-        if ! git branch --merged "$default_branch" | grep -Eq "^[* ] +$branch\$"; then
+        # --format, not the default listing: git marks a branch checked out in
+        # ANOTHER worktree with "+", which "^[* ]" never matched, and an
+        # interpolated branch name is a regex there ("-Fxq" takes it literally).
+        if ! git branch --merged "$default_branch" --format='%(refname:short)' |
+          grep -Fxq -- "$branch"; then
           echo >&2 "Error: branch '$branch' is not merged into '$default_branch'. Use -B to force delete."
           return 1
         fi
@@ -777,7 +781,10 @@ EOF
 
         # Pre-flight check: validate branch merge status if safe delete requested
         if [[ -n "$wt_branch" && $delete_local -eq 1 ]]; then
-          if ! git -C "$git_root" branch --merged "$default_branch" | grep -Eq "^[* ] +$wt_branch\$"; then
+          # See the single-target check above: "+" for a branch checked out in
+          # another worktree is exactly this path's normal case.
+          if ! git -C "$git_root" branch --merged "$default_branch" --format='%(refname:short)' |
+            grep -Fxq -- "$wt_branch"; then
             echo >&2 "Error: branch '$wt_branch' (worktree '$wt_name') is not merged into '$default_branch'. Use -B to force delete."
             return 1
           fi

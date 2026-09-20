@@ -4008,3 +4008,33 @@ EOF
   run git -C "$FLAT_REPO" branch --show-current
   assert_output "main"
 }
+
+# ----------------------------------------------------------------------------
+# Pre-existing defects (independent of the flat-repo work)
+# ----------------------------------------------------------------------------
+
+@test "gwtmux -d: -dwb deletes a merged branch checked out in another worktree" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add "$WORKTREE_PARENT/test-wt" -b test-branch main >/dev/null 2>&1
+  git -C "$WORKTREE_PARENT/test-wt" config user.name "Test User"
+  git -C "$WORKTREE_PARENT/test-wt" config user.email "test@example.com"
+  echo "test" >"$WORKTREE_PARENT/test-wt/test.txt"
+  git -C "$WORKTREE_PARENT/test-wt" add test.txt
+  git -C "$WORKTREE_PARENT/test-wt" commit -m "Test" >/dev/null 2>&1
+  git -C "$MAIN_REPO" merge test-branch >/dev/null 2>&1
+
+  # git marks a branch checked out in ANOTHER worktree with "+", never "*" or a
+  # space - which is every branch this code path is asked to delete.
+  run git -C "$MAIN_REPO" branch --merged main
+  assert_output --partial "+ test-branch"
+
+  run gwtmux -dwb test-branch
+  assert_success
+  refute_output --partial "not merged"
+
+  refute [ -d "$WORKTREE_PARENT/test-wt" ]
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "test-branch"
+}
