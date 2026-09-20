@@ -31,6 +31,14 @@ window for each worktree, clean up with `-d`, and rename in a worktree that you 
 
 A flat repo does not fetch, because it resolves no branch from a remote.
 
+Submodules are not supported. gwtmux resolves the repo root from
+`git rev-parse --git-common-dir`, which inside a submodule points at
+`<superproject>/.git/modules` - so every lookup aims at the superproject, not
+at anything you can see. Done mode (`-d`) therefore refuses to run inside a
+submodule. That refusal does not reach every case: inside a WORKTREE of a
+submodule it does not fire, and the other modes do not check at all. Do not
+run gwtmux inside a submodule.
+
 ### Support matrix
 
 |                            | convention              | flat                    |
@@ -104,7 +112,16 @@ gwtmux feature-1 feature-2 bugfix-3
 # Open all existing worktrees in windows (run from repo parent dir,
 # or from anywhere inside a flat repo)
 gwtmux
+
+# Open an existing worktree by path
+gwtmux ../other-worktree
 ```
+
+An argument counts as a path when it has the shape of a path (`/...`, `./...`,
+`../...`, `.` or `..`) or when it is the root of a worktree. A path argument
+must be that root: a subdirectory of a worktree is an error, and so is a
+path-shaped argument that is no worktree at all. Thus a branch name that
+contains a slash, such as `feature/auth`, stays a branch name.
 
 ### Cleanup (Done Mode)
 
@@ -128,6 +145,15 @@ gwtmux -dwbr   # or -dwBr for force
 gwtmux -dwB feature-1 feature-2
 ```
 
+A name is matched against the worktrees of the repo by path, then directory
+name, then branch. An ambiguous name is an error and nothing is deleted.
+
+Worktrees nested inside a target are removed too, after a prompt. Their
+branches obey the same `-b` merge rule as the target, and gwtmux never removes
+a nested worktree with `--force`: uncommitted work there stops the operation,
+just as it does in the target itself. A target that gwtmux cannot remove keeps
+its branch and its tmux window, and the command exits non-zero.
+
 ### Rename
 
 ```bash
@@ -145,8 +171,13 @@ This command makes all names agree with the new name:
 
 The command skips each step that already matches the new name. Thus you can
 use it to unify a worktree, branch, and remote branch that have different
-names. The command deletes the old remote branch only when the latest commit
-is authored by you.
+names.
+
+The command deletes the old remote branch only when the latest commit is
+authored by you, and only when that remote branch contains no commit that the
+renamed branch lacks. A branch that tracks a differently named shared branch,
+as `git checkout -b feat origin/develop` makes it, therefore keeps
+`origin/develop` and gets a warning instead.
 
 ## License
 

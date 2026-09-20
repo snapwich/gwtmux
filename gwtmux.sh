@@ -522,8 +522,10 @@ FLAT REPOS:
   --rename at repo root     error                   error
 
   Windows are named <parent>/<branch> in a convention repo, and <repo> or
-  <repo>/<dir name> in a flat repo. Two worktrees of one repo cannot share a
-  directory name, because their windows would have the same name.
+  <repo>/<dir name> in a flat repo. Two worktrees of one repo cannot map to the
+  same window name: two flat worktrees in directories of the same name collide,
+  while two convention worktrees of the same directory name do not, because
+  their branches name their windows.
 
 DONE MODE (-d):
   gwtmux -d                Delete current worktree's tmux window only
@@ -542,6 +544,11 @@ DONE MODE (-d):
   branch (main or master) before they delete. That needs a tree with no
   uncommitted changes, and a branch that is not the primary branch itself.
   Bare -d deletes nothing, thus it switches nothing.
+  Worktrees nested inside a target are removed too, after a prompt. Their
+  branches obey the same -b merge rule, and nothing there is ever removed with
+  --force, so uncommitted work in a nested worktree stops the operation.
+  A target that cannot be removed keeps its branch and its window, and the
+  whole command then exits non-zero.
   If current window is last in session, renames to shell name instead of killing.
 
 RENAME MODE (--rename):
@@ -567,6 +574,9 @@ REQUIREMENTS:
   - git, tmux (required)
   - gh (optional, for PR number support)
   - Must be run inside tmux session
+  - Submodules are not supported: the repo gwtmux resolves inside one is the
+    superproject. -d refuses to run there; the refusal does not reach a
+    worktree of a submodule, and the other modes do not check at all.
 
 For more info: https://github.com/snapwich/gwtmux
 EOF
