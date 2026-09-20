@@ -634,6 +634,62 @@ myrepo/existing"
 }
 
 # ----------------------------------------------------------------------------
+# Path argument detection
+# ----------------------------------------------------------------------------
+
+@test "gwtmux: branch with slash is not hijacked by a matching directory" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  stub_gh_fail
+
+  # A directory named exactly like the branch. The arg is not path-shaped, so
+  # it must stay a branch name instead of opening that directory.
+  mkdir -p "$MAIN_REPO/feature/auth"
+
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux feature/auth"
+  confirm_branch_creation "$TEST_SESSION"
+  wait_for_dir_exists "$WORKTREE_PARENT/feature_auth"
+  wait_cmd_done
+
+  # Worktree directory uses underscores; branch keeps the slash
+  assert_dir_exists "$WORKTREE_PARENT/feature_auth"
+  run git -C "$WORKTREE_PARENT/feature_auth" branch --show-current
+  assert_output "feature/auth"
+
+  run get_tmux_windows
+  assert_output --partial "myrepo/feature/auth"
+}
+
+@test "gwtmux: errors on relative path that is not a worktree root" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  mkdir -p "$MAIN_REPO/src"
+
+  local before_count="$(get_window_count)"
+  run gwtmux ./src
+  assert_failure
+  assert_output --partial "Error: './src' is not a worktree root (did you mean '$MAIN_REPO'?)"
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux: errors on absolute path that is not a worktree root" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add -b sub-wt "$WORKTREE_PARENT/sub-wt" main >/dev/null 2>&1
+  mkdir -p "$WORKTREE_PARENT/sub-wt/nested/deep"
+
+  local before_count="$(get_window_count)"
+  run gwtmux "$WORKTREE_PARENT/sub-wt/nested/deep"
+  assert_failure
+  assert_output --partial "is not a worktree root"
+  assert_output --partial "$WORKTREE_PARENT/sub-wt"
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+# ----------------------------------------------------------------------------
 # Window naming: detached HEAD
 # ----------------------------------------------------------------------------
 

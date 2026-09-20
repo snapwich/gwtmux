@@ -39,6 +39,18 @@ _gwtmux_git_dir_path() {
   (cd "$cwd" && cd "$dir" && pwd -P) 2>/dev/null
 }
 
+# Resolve the root of the worktree that contains a directory, absolute and
+# normalized. Fails (prints nothing) when the directory is not inside a
+# worktree. Callers compare the result against the directory itself to tell a
+# worktree root from a subdirectory of one.
+# Args: <dir>
+_gwtmux_worktree_root() {
+  local dir="$1" top
+  top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [[ -z "$top" ]] && return 1
+  (cd "$top" && pwd -P) 2>/dev/null
+}
+
 # Compute the tmux window name for a worktree. Single source of truth: every
 # naming site routes through here so one worktree always maps to one name.
 # Args: <worktree_path> [git_root] [branch]
@@ -796,7 +808,7 @@ EOF
     local success_count=0
 
     # Declare loop variables outside the loop to avoid re-declaration issues
-    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched pr_branch arg_parent arg_basename resolved_parent repo_parent_candidate path_matched resolved_path existing_window_id
+    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched pr_branch arg_parent arg_basename resolved_parent repo_parent_candidate path_matched arg_is_path_shaped arg_worktree_root resolved_path existing_window_id
 
     # Save original directory for resolving relative args after cd
     local orig_pwd="$PWD"
@@ -813,19 +825,37 @@ EOF
       has_git_root="$orig_has_git_root"
       repo_path_matched=0
 
-      # Check if argument is a path to an existing worktree (can be any repo)
+      # Check if argument is a path to an existing worktree (can be any repo).
+      # An arg only counts as a path when it is explicitly path-shaped ("/...",
+      # "./...", "../...") or resolves to a worktree root. An arg that merely
+      # contains a slash, like a "feature/auth" branch name, must not be
+      # hijacked as a path just because a directory of that name happens to
+      # exist next to it.
       path_matched=0
-      if [[ "$arg" == /* || "$arg" == .* || "$arg" == */* ]]; then
-        if [[ -d "$arg" ]]; then
-          resolved_path="$(cd "$arg" 2>/dev/null && pwd -P)"
-          if [[ -n "$resolved_path" ]] && $git_cmd -C "$resolved_path" rev-parse --git-dir &>/dev/null; then
-            # It's a git directory - the window name comes from the path
-            # itself, so no branch resolution is needed
-            worktree_path="$resolved_path"
-            worktree_exists=1
-            path_matched=1
-          fi
+      arg_is_path_shaped=0
+      case "$arg" in
+      /* | ./* | ../* | . | ..) arg_is_path_shaped=1 ;;
+      esac
+      resolved_path=""
+      arg_worktree_root=""
+      if [[ -d "$arg" ]]; then
+        resolved_path="$(cd "$arg" 2>/dev/null && pwd -P)"
+        if [[ -n "$resolved_path" ]]; then
+          arg_worktree_root="$(_gwtmux_worktree_root "$resolved_path")" || arg_worktree_root=""
         fi
+      fi
+      if [[ -n "$arg_worktree_root" && "$arg_worktree_root" == "$resolved_path" ]]; then
+        # A worktree root - the window name comes from the worktree itself, so
+        # no branch resolution is needed
+        worktree_path="$resolved_path"
+        worktree_exists=1
+        path_matched=1
+      elif [[ -n "$arg_worktree_root" && $arg_is_path_shaped -eq 1 ]]; then
+        # Deliberately a path, but a subdirectory of a worktree rather than the
+        # root of one. Opening it would give a window that no other gwtmux
+        # command can find again, so name the root and stop.
+        echo >&2 "Error: '$arg' is not a worktree root (did you mean '$arg_worktree_root'?)"
+        return 1
       fi
 
       # If not an existing path, check if a leading path prefix is a repo parent
