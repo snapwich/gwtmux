@@ -3576,6 +3576,14 @@ myrepo/existing"
   assert_equal "$(get_window_count)" "$before_count"
 }
 
+# The four refusal tests below run gwtmux inside a tmux pane and read its output
+# from a file instead of calling it in the bats process. A regression that lets
+# the argument through reaches "Create new branch? [y/N]", which reads from
+# /dev/tty: in the bats process that blocks forever with no timeout, so the test
+# hangs instead of failing. In a pane the same block is bounded by
+# wait_cmd_done, the marker never appears, and the exit-code assertion fails.
+# Output goes to a file, not capture-pane: these messages carry an absolute path
+# and would wrap across pane lines.
 @test "gwtmux: errors on a branch argument inside a flat repo" {
   setup_flat_repo "j2"
   stub_gh_fail
@@ -3584,8 +3592,11 @@ myrepo/existing"
   local before_list="$(git -C "$FLAT_REPO" worktree list --porcelain)"
   local before_count="$(get_window_count)"
 
-  run gwtmux feature-x
-  assert_failure
+  send_cmd "$TEST_SESSION" "cd $FLAT_REPO && gwtmux feature-x >$TEST_TEMP_DIR/out 2>&1"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "1"
+
+  run cat "$TEST_TEMP_DIR/out"
   assert_output --partial "'$FLAT_REPO' is a flat repo"
   assert_output --partial "cannot create worktree 'feature-x'"
 
@@ -3608,8 +3619,11 @@ EOF
   chmod +x "$STUB_DIR/gh"
 
   cd "$FLAT_REPO"
-  run gwtmux 123
-  assert_failure
+  send_cmd "$TEST_SESSION" "cd $FLAT_REPO && gwtmux 123 >$TEST_TEMP_DIR/out 2>&1"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "1"
+
+  run cat "$TEST_TEMP_DIR/out"
   assert_output --partial "'$FLAT_REPO' is a flat repo"
   assert_output --partial "cannot create worktree '123'"
 
@@ -3621,8 +3635,11 @@ EOF
   setup_flat_repo "j2"
   cd "$MAIN_REPO"
 
-  run gwtmux "$FLAT_REPO/feature-x"
-  assert_failure
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux $FLAT_REPO/feature-x >$TEST_TEMP_DIR/out 2>&1"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "1"
+
+  run cat "$TEST_TEMP_DIR/out"
   assert_output --partial "'$FLAT_REPO' is a flat repo"
   assert_output --partial "cannot create worktree 'feature-x'"
 
@@ -3638,8 +3655,11 @@ EOF
   mkdir -p "$FLAT_REPO/src"
   cd "$MAIN_REPO"
 
-  run gwtmux "$FLAT_REPO/src/feature-x"
-  assert_failure
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux $FLAT_REPO/src/feature-x >$TEST_TEMP_DIR/out 2>&1"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "1"
+
+  run cat "$TEST_TEMP_DIR/out"
   assert_output --partial "'$FLAT_REPO' is a flat repo"
   # The walk folds the prefix into the branch name, as it does for a repo parent
   assert_output --partial "cannot create worktree 'src/feature-x'"
