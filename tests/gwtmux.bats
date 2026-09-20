@@ -36,6 +36,48 @@ wait_for_dir_exists() { wait_until "[ -d '$1' ]"; }
 wait_for_window_exists() { wait_until "get_tmux_windows | grep -Fxq '$1'"; }
 wait_for_window_closed() { wait_until "! get_tmux_windows | grep -Fxq '$1'"; }
 
+# Send a command to a tmux pane, tagged so we can tell when it has FINISHED.
+#
+# Waiting on a side effect (a directory appearing, a window appearing) only
+# proves the command reached the step that produces it. gwtmux does several
+# things per invocation - --rename moves the directory first and only then
+# pushes, deletes the old remote branch and sets upstream - so a test that
+# resumes on the directory races the remaining steps: it passes on a fast
+# machine and fails on a loaded one. Pair send_cmd with wait_cmd_done, after
+# answering any prompts, to wait for the command itself.
+_CMD_SEQ=0
+send_cmd() {
+  local target="$1" cmd="$2"
+  _CMD_SEQ=$((_CMD_SEQ + 1))
+  CMD_MARKER="$TEST_TEMP_DIR/cmd_done_$_CMD_SEQ"
+  # Resolve the target to a concrete pane id up front. Several gwtmux
+  # invocations kill the window they run in, so the trailing marker write never
+  # happens and wait_cmd_done has to fall back to "the pane is gone". A session
+  # or window name cannot express that: it just re-resolves to whatever is
+  # active now, and stays valid as long as the session has any window left.
+  #
+  # Fail loudly if it does not resolve. tmux reports a missing target by
+  # printing nothing and still exiting 0, and "send-keys -t ''" then falls
+  # back to the server's *current* pane - as does "list-panes -t ''", so
+  # wait_cmd_done would not notice either. The suite shares the default tmux
+  # server with whatever else is running on it, so an unresolved target would
+  # type this command into an unrelated pane.
+  CMD_TARGET="$(tmux display-message -p -t "$target" '#{pane_id}')"
+  if [[ ! "$CMD_TARGET" =~ ^%[0-9]+$ ]]; then
+    echo "send_cmd: target '$target' did not resolve to a pane id" >&2
+    return 1
+  fi
+  rm -f "$CMD_MARKER"
+  tmux send-keys -t "$CMD_TARGET" "$cmd; echo \$? > '$CMD_MARKER'" Enter
+}
+
+# Wait for the last send_cmd to finish. Some gwtmux invocations kill the window
+# they run in, so the trailing marker write can never happen; treat the target
+# disappearing as completion too.
+wait_cmd_done() {
+  wait_until "[ -f '$CMD_MARKER' ] || ! tmux list-panes -t '$CMD_TARGET' >/dev/null 2>&1"
+}
+
 # Confirm new branch creation prompt (sends "y" when prompt appears)
 confirm_branch_creation() {
   local target="${1:-$TEST_SESSION}"
@@ -140,6 +182,21 @@ get_tmux_windows() {
   tmux list-windows -t "$TEST_SESSION" -F "#W" 2>/dev/null || true
 }
 
+# Count tmux windows in the test session.
+#
+# Not "| wc -l": BSD wc right-pads its output to width 8, so on macOS a count
+# reads "       4". bats' assert_equal is a string comparison, so a padded
+# count never matches the unpadded result of "$((count + 1))" even when the
+# two numbers are equal. GNU wc does not pad, which is why CI never saw this.
+get_window_count() {
+  local -a windows=()
+  local line
+  while IFS= read -r line; do
+    windows+=("$line")
+  done < <(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" 2>/dev/null)
+  echo "${#windows[@]}"
+}
+
 # Check if tmux window exists
 tmux_window_exists() {
   local window_name="$1"
@@ -156,8 +213,35 @@ get_current_window() {
 # ============================================================================
 
 setup() {
-  # Use bats built-in temp directory
-  TEST_TEMP_DIR="$BATS_TEST_TMPDIR"
+  # Use bats built-in temp directory, resolved to its physical path.
+  #
+  # On macOS $BATS_TEST_TMPDIR sits under /var/folders, and /var is a symlink
+  # to /private/var. git reports worktree paths physically ("/private/var/..."),
+  # while $PWD in a tmux pane keeps the logical "/var/..." form. gwtmux's no-arg
+  # mode opens only the worktrees whose parent directory equals $PWD, so under
+  # the logical path it matched nothing, created no windows and still exited 0.
+  # Linux CI has no such symlink, so the suite was green there.
+  TEST_TEMP_DIR="$(cd "$BATS_TEST_TMPDIR" && pwd -P)"
+
+  # Isolate git from the developer's global/system config. Without this, a
+  # global "commit.gpgsign = true" makes every git commit below try to sign,
+  # which fails non-interactively: the commit fails, then the push, then
+  # "remote set-head", and setup_git_repos exits 128 so every test errors in
+  # setup. CI only passes because its global config happens to be empty.
+  TEST_GITCONFIG="$TEST_TEMP_DIR/gitconfig"
+  cat >"$TEST_GITCONFIG" <<'GITCONFIG'
+[user]
+	name = Test User
+	email = test@example.com
+[init]
+	defaultBranch = main
+[commit]
+	gpgsign = false
+[tag]
+	gpgsign = false
+GITCONFIG
+  export GIT_CONFIG_GLOBAL="$TEST_GITCONFIG"
+  export GIT_CONFIG_SYSTEM=/dev/null
 
   # Create unique tmux session name for this test
   TEST_SESSION="bats_test_$$_${BATS_TEST_NUMBER}"
@@ -172,6 +256,8 @@ setup() {
   cat > "$TEST_BASHRC" <<EOF
 source "${BATS_TEST_DIRNAME}/../gwtmux.sh"
 export PATH="$STUB_DIR:\$PATH"
+export GIT_CONFIG_GLOBAL="$TEST_GITCONFIG"
+export GIT_CONFIG_SYSTEM=/dev/null
 EOF
 
   # Create detached tmux session with our custom shell init
@@ -211,9 +297,10 @@ teardown() {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux new-feature 2>&1; echo EXIT_CODE:\$?" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux new-feature 2>&1; echo EXIT_CODE:\$?"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/new-feature"
+  wait_cmd_done
 
   # Check what happened in tmux
   run tmux capture-pane -t "$TEST_SESSION" -p
@@ -247,9 +334,10 @@ teardown() {
   # Confirm they actually diverged
   assert_not_equal "$origin_head" "$local_head"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux remote-branch 2>&1; echo EXIT_CODE:\$?" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux remote-branch 2>&1; echo EXIT_CODE:\$?"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/remote-branch"
+  wait_cmd_done
 
   local branch_head
   branch_head="$(git -C "$WORKTREE_PARENT/remote-branch" rev-parse HEAD)"
@@ -260,9 +348,10 @@ teardown() {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux no-track-test 2>&1; echo EXIT_CODE:\$?" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux no-track-test 2>&1; echo EXIT_CODE:\$?"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/no-track-test"
+  wait_cmd_done
 
   # New branches should not track origin/main
   run git -C "$WORKTREE_PARENT/no-track-test" config branch.no-track-test.remote
@@ -279,8 +368,9 @@ teardown() {
   git checkout -b existing-branch >/dev/null 2>&1
   git checkout main >/dev/null 2>&1
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux existing-branch" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux existing-branch"
   wait_for_dir_exists "$WORKTREE_PARENT/existing-branch"
+  wait_cmd_done
 
   assert_dir_exists "$WORKTREE_PARENT/existing-branch"
   run get_tmux_windows
@@ -294,9 +384,10 @@ teardown() {
   # Nested subdirectory of the main repo
   mkdir -p "$MAIN_REPO/src/deep"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO/src/deep && gwtmux subdir-branch 2>&1" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO/src/deep && gwtmux subdir-branch 2>&1"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/subdir-branch"
+  wait_cmd_done
 
   # Sibling of the repo root, not nested inside the repo
   assert_dir_exists "$WORKTREE_PARENT/subdir-branch"
@@ -313,9 +404,10 @@ teardown() {
   git worktree add -b first-branch "$WORKTREE_PARENT/first-branch" >/dev/null 2>&1
   mkdir -p "$WORKTREE_PARENT/first-branch/src/deep"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $WORKTREE_PARENT/first-branch/src/deep && gwtmux second-branch 2>&1" Enter
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT/first-branch/src/deep && gwtmux second-branch 2>&1"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/second-branch"
+  wait_cmd_done
 
   assert_dir_exists "$WORKTREE_PARENT/second-branch"
   refute [ -d "$WORKTREE_PARENT/first-branch/src/second-branch" ]
@@ -338,8 +430,9 @@ teardown() {
   # Fetch to update remote refs
   git fetch >/dev/null 2>&1
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux remote-feature" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux remote-feature"
   wait_for_dir_exists "$WORKTREE_PARENT/remote-feature"
+  wait_cmd_done
 
   assert_dir_exists "$WORKTREE_PARENT/remote-feature"
   run get_tmux_windows
@@ -352,9 +445,10 @@ teardown() {
 
   stub_gh_pr "123" "pr-123-feature"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux 123" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux 123"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/pr-123-feature"
+  wait_cmd_done
 
   assert_dir_exists "$WORKTREE_PARENT/pr-123-feature"
   run get_tmux_windows
@@ -367,9 +461,10 @@ teardown() {
 
   stub_gh_fail
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux not-a-pr" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux not-a-pr"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/not-a-pr"
+  wait_cmd_done
 
   # Should create worktree with "not-a-pr" as branch name
   assert_dir_exists "$WORKTREE_PARENT/not-a-pr"
@@ -387,8 +482,9 @@ teardown() {
 
   # Try to create again - should just select the window
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
-  tmux send-keys -t "$first_window" "cd $MAIN_REPO && gwtmux existing" Enter
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux existing"
   wait_for_window_exists "myrepo/existing"
+  wait_cmd_done
 
   # Should have selected the window (not created a duplicate)
   run get_tmux_windows
@@ -404,8 +500,9 @@ myrepo/existing"
   git worktree add -b existing-wt "$WORKTREE_PARENT/existing-wt" main >/dev/null 2>&1
 
   # Open the other worktree via relative path from default worktree
-  tmux send-keys -t "$TEST_SESSION" "cd $WORKTREE_PARENT/default && gwtmux ../existing-wt" Enter
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT/default && gwtmux ../existing-wt"
   wait_for_window_exists "myrepo/existing-wt"
+  wait_cmd_done
 
   # Window should exist
   run get_tmux_windows
@@ -420,8 +517,9 @@ myrepo/existing"
   git worktree add -b existing-wt "$WORKTREE_PARENT/existing-wt" main >/dev/null 2>&1
 
   # Open via absolute path
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux $WORKTREE_PARENT/existing-wt" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux $WORKTREE_PARENT/existing-wt"
   wait_for_window_exists "myrepo/existing-wt"
+  wait_cmd_done
 
   # Window should exist
   run get_tmux_windows
@@ -445,8 +543,9 @@ myrepo/existing"
   git -C "$OTHER_REPO_PARENT/default" worktree add -b feature "$OTHER_REPO_PARENT/feature" >/dev/null 2>&1
 
   # From myrepo, open the other repo's worktree via relative path
-  tmux send-keys -t "$TEST_SESSION" "cd $WORKTREE_PARENT/default && gwtmux ../../otherrepo/feature" Enter
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT/default && gwtmux ../../otherrepo/feature"
   wait_for_window_exists "otherrepo/feature"
+  wait_cmd_done
 
   # Window should have correct repo name from the OTHER repo
   run get_tmux_windows
@@ -468,8 +567,9 @@ myrepo/existing"
 
   # From myrepo, open the other repo's default worktree via relative path
   # This tests the .git case where git-common-dir returns ".git"
-  tmux send-keys -t "$TEST_SESSION" "cd $WORKTREE_PARENT/default && gwtmux ../../otherrepo/default" Enter
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT/default && gwtmux ../../otherrepo/default"
   wait_until "get_tmux_windows | grep -q 'otherrepo/default'"
+  wait_cmd_done
 
   # Window should use directory name "default" (not the branch name)
   run get_tmux_windows
@@ -492,8 +592,9 @@ myrepo/existing"
   mkdir -p "$OUTSIDE_DIR"
 
   # Open worktree via absolute path from outside any git repo
-  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux $WORKTREE_PARENT/feature-wt" Enter
+  send_cmd "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux $WORKTREE_PARENT/feature-wt"
   wait_for_window_exists "myrepo/feature-wt"
+  wait_cmd_done
 
   # Window should exist with correct repo/branch name
   run get_tmux_windows
@@ -512,8 +613,9 @@ myrepo/existing"
   mkdir -p "$OUTSIDE_DIR"
 
   # Open worktree via relative path from outside any git repo
-  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/feature-wt" Enter
+  send_cmd "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/feature-wt"
   wait_for_window_exists "myrepo/feature-wt"
+  wait_cmd_done
 
   # Window should exist with correct repo/branch name
   run get_tmux_windows
@@ -544,8 +646,9 @@ myrepo/existing"
   git -C default worktree add -b feature-2 "$WORKTREE_PARENT/feature-2" main >/dev/null 2>&1
 
   # Run gwtmux without arguments from parent directory
-  tmux send-keys -t "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux" Enter
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux"
   wait_for_window_exists "myrepo/feature-2"
+  wait_cmd_done
 
   # Should create windows for all worktrees
   run get_tmux_windows
@@ -570,9 +673,10 @@ myrepo/existing"
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux feature/with/slashes" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux feature/with/slashes"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/feature_with_slashes"
+  wait_cmd_done
 
   # Directory should use underscores
   assert_dir_exists "$WORKTREE_PARENT/feature_with_slashes"
@@ -598,14 +702,15 @@ myrepo/existing"
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
   tmux rename-window -t "$first_window" "$shell_name"
 
-  local initial_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local initial_window_count=$(get_window_count)
 
-  tmux send-keys -t "$first_window" "cd $MAIN_REPO && gwtmux new-branch" Enter
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux new-branch"
   confirm_branch_creation "$first_window"
   wait_for_dir_exists "$WORKTREE_PARENT/new-branch"
+  wait_cmd_done
 
   # Window should have been renamed (not created new)
-  local final_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local final_window_count=$(get_window_count)
   assert_equal "$initial_window_count" "$final_window_count"
 
   # Window should now be named after the worktree
@@ -625,16 +730,17 @@ myrepo/existing"
   tmux rename-window -t "$first_window" "$shell_name"
   tmux split-window -t "$first_window"
 
-  local initial_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local initial_window_count=$(get_window_count)
 
   # Get the first pane of the window
   local first_pane=$(tmux list-panes -t "$first_window" -F "#{pane_id}" | head -1)
-  tmux send-keys -t "$first_pane" "cd $MAIN_REPO && gwtmux new-branch" Enter
+  send_cmd "$first_pane" "cd $MAIN_REPO && gwtmux new-branch"
   confirm_branch_creation "$first_pane"
   wait_for_dir_exists "$WORKTREE_PARENT/new-branch"
+  wait_cmd_done
 
   # Should have created a new window (not reused)
-  local final_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local final_window_count=$(get_window_count)
   assert [ "$final_window_count" -gt "$initial_window_count" ]
 
   # Both windows should exist
@@ -651,14 +757,15 @@ myrepo/existing"
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
   tmux rename-window -t "$first_window" "other-window"
 
-  local initial_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local initial_window_count=$(get_window_count)
 
-  tmux send-keys -t "$first_window" "cd $MAIN_REPO && gwtmux new-branch" Enter
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux new-branch"
   confirm_branch_creation "$first_window"
   wait_for_dir_exists "$WORKTREE_PARENT/new-branch"
+  wait_cmd_done
 
   # Should have created a new window
-  local final_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local final_window_count=$(get_window_count)
   assert [ "$final_window_count" -gt "$initial_window_count" ]
 }
 
@@ -671,11 +778,12 @@ myrepo/existing"
   cd "$MAIN_REPO"
 
   local initial_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
-  tmux send-keys -t "$initial_window" "cd $MAIN_REPO && gwtmux feature-1 feature-2 feature-3" Enter
+  send_cmd "$initial_window" "cd $MAIN_REPO && gwtmux feature-1 feature-2 feature-3"
   confirm_branch_creation "$initial_window"
   confirm_branch_creation "$initial_window"
   confirm_branch_creation "$initial_window"
   wait_for_dir_exists "$WORKTREE_PARENT/feature-3"
+  wait_cmd_done
 
   # All worktrees should be created
   assert_dir_exists "$WORKTREE_PARENT/feature-1"
@@ -697,11 +805,12 @@ myrepo/existing"
   touch "$WORKTREE_PARENT/conflict"
 
   local initial_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
-  tmux send-keys -t "$initial_window" "cd $MAIN_REPO && gwtmux good-1 conflict good-2" Enter
+  send_cmd "$initial_window" "cd $MAIN_REPO && gwtmux good-1 conflict good-2"
   confirm_branch_creation "$initial_window"
   confirm_branch_creation "$initial_window"
   confirm_branch_creation "$initial_window"
   wait_for_dir_exists "$WORKTREE_PARENT/good-2"
+  wait_cmd_done
 
   # Should create the valid worktrees
   assert_dir_exists "$WORKTREE_PARENT/good-1"
@@ -728,16 +837,17 @@ myrepo/existing"
   tmux new-window -t "$TEST_SESSION" -n "myrepo/existing-1" -c "$WORKTREE_PARENT/existing-1" 2>/dev/null
   tmux new-window -t "$TEST_SESSION" -n "myrepo/existing-2" -c "$WORKTREE_PARENT/existing-2" 2>/dev/null
 
-  local window_count_before=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local window_count_before=$(get_window_count)
 
   # Try to create both plus a new one
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
-  tmux send-keys -t "$first_window" "cd $MAIN_REPO && gwtmux existing-1 existing-2 new-one" Enter
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux existing-1 existing-2 new-one"
   confirm_branch_creation "$first_window"
   wait_for_dir_exists "$WORKTREE_PARENT/new-one"
+  wait_cmd_done
 
   # Should have one more window (new-one), not duplicates
-  local window_count_after=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local window_count_after=$(get_window_count)
   assert_equal "$((window_count_before + 1))" "$window_count_after"
 
   # new-one worktree should be created
@@ -754,15 +864,16 @@ myrepo/existing"
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
   tmux rename-window -t "$first_window" "$shell_name"
 
-  local initial_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local initial_window_count=$(get_window_count)
 
-  tmux send-keys -t "$first_window" "cd $MAIN_REPO && gwtmux feat-a feat-b" Enter
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux feat-a feat-b"
   confirm_branch_creation "$first_window"
   confirm_branch_creation "$first_window"
   wait_for_dir_exists "$WORKTREE_PARENT/feat-b"
+  wait_cmd_done
 
   # Should have 2 windows total (reused one, created one new)
-  local final_window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local final_window_count=$(get_window_count)
   assert_equal "$((initial_window_count + 1))" "$final_window_count"
 
   # Should not have shell window anymore
@@ -787,9 +898,10 @@ myrepo/existing"
   assert_output "refs/remotes/origin/main"
 
   # Create new branch (should be based on main)
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux test-branch" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux test-branch"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/test-branch"
+  wait_cmd_done
 
   # Verify the branch was created
   assert_dir_exists "$WORKTREE_PARENT/test-branch"
@@ -803,9 +915,10 @@ myrepo/existing"
   git remote set-head origin -d >/dev/null 2>&1
 
   # Create new branch (should still find main)
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux test-branch" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux test-branch"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/test-branch"
+  wait_cmd_done
 
   assert_dir_exists "$WORKTREE_PARENT/test-branch"
 }
@@ -835,9 +948,10 @@ myrepo/existing"
   # Remove symbolic-ref to force fallback
   git remote set-head origin -d >/dev/null 2>&1
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux test-branch" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux test-branch"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/test-branch"
+  wait_cmd_done
 
   assert_dir_exists "$WORKTREE_PARENT/test-branch"
 }
@@ -872,9 +986,10 @@ myrepo/existing"
   # Create a file where worktree dir would be created
   touch "$WORKTREE_PARENT/conflict"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux conflict" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux conflict"
   confirm_branch_creation "$TEST_SESSION"
   wait_until "tmux capture-pane -t '$TEST_SESSION' -p | grep -q 'failed to create worktree'"
+  wait_cmd_done
 
   # Should see error about failed worktree creation
   run tmux capture-pane -t "$TEST_SESSION" -p
@@ -889,10 +1004,11 @@ myrepo/existing"
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $MAIN_REPO && gwtmux declined-branch" Enter
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux declined-branch"
   wait_until "tmux capture-pane -t '$TEST_SESSION' -p | grep -q 'Create new branch'"
   tmux send-keys -t "$TEST_SESSION" "n" Enter
   wait_until "tmux capture-pane -t '$TEST_SESSION' -p | grep -q 'Skipping'"
+  wait_cmd_done
 
   # Worktree should NOT be created
   refute [ -d "$WORKTREE_PARENT/declined-branch" ]
@@ -926,9 +1042,10 @@ myrepo/existing"
   git -C "$OTHER_REPO_PARENT/default" remote set-head origin main >/dev/null 2>&1
 
   # From myrepo, create a new branch in otherrepo via path
-  tmux send-keys -t "$TEST_SESSION" "cd $WORKTREE_PARENT/default && gwtmux ../../otherrepo/new-branch" Enter
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT/default && gwtmux ../../otherrepo/new-branch"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$OTHER_REPO_PARENT/new-branch"
+  wait_cmd_done
 
   # Worktree should be created in otherrepo
   assert_dir_exists "$OTHER_REPO_PARENT/new-branch"
@@ -948,9 +1065,10 @@ myrepo/existing"
   # Branch name itself contains a slash. The repo parent must be found by
   # walking up past the branch components (myrepo is the repo parent, the
   # branch is demo/test-branch).
-  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/demo/test-branch" Enter
+  send_cmd "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/demo/test-branch"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/demo_test-branch"
+  wait_cmd_done
 
   # Directory uses underscores; branch keeps the slash
   assert_dir_exists "$WORKTREE_PARENT/demo_test-branch"
@@ -970,9 +1088,10 @@ myrepo/existing"
   mkdir -p "$OUTSIDE_DIR"
 
   # From outside any git repo, create a new branch in myrepo via path
-  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/new-branch" Enter
+  send_cmd "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/new-branch"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/new-branch"
+  wait_cmd_done
 
   # Worktree should be created in myrepo
   assert_dir_exists "$WORKTREE_PARENT/new-branch"
@@ -994,8 +1113,9 @@ myrepo/existing"
   mkdir -p "$OUTSIDE_DIR"
 
   # Open existing worktree via repo-parent path - should NOT prompt
-  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/existing-wt" Enter
+  send_cmd "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/existing-wt"
   wait_for_window_exists "myrepo/existing-wt"
+  wait_cmd_done
 
   # Window should exist (path_matched handled it, no prompt)
   run get_tmux_windows
@@ -1021,9 +1141,10 @@ myrepo/existing"
   tmux rename-window -t "$first_window" "$shell_name"
 
   # Open both worktrees via repo-parent paths
-  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/feat-one ../myrepo/feat-two" Enter
+  send_cmd "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/feat-one ../myrepo/feat-two"
   wait_for_window_exists "myrepo/feat-one"
   wait_for_window_exists "myrepo/feat-two"
+  wait_cmd_done
 
   run get_tmux_windows
   assert_output --partial "myrepo/feat-one"
@@ -1051,10 +1172,11 @@ myrepo/existing"
 
   # From myrepo, create a branch in otherrepo AND a local branch
   local initial_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
-  tmux send-keys -t "$initial_window" "cd $WORKTREE_PARENT/default && gwtmux ../../otherrepo/other-feat local-feat" Enter
+  send_cmd "$initial_window" "cd $WORKTREE_PARENT/default && gwtmux ../../otherrepo/other-feat local-feat"
   confirm_branch_creation "$initial_window"
   confirm_branch_creation "$initial_window"
   wait_for_dir_exists "$WORKTREE_PARENT/local-feat"
+  wait_cmd_done
 
   # otherrepo branch should be in otherrepo
   assert_dir_exists "$OTHER_REPO_PARENT/other-feat"
@@ -1075,9 +1197,10 @@ myrepo/existing"
   local OUTSIDE_DIR="$TEST_TEMP_DIR/not-a-repo"
   mkdir -p "$OUTSIDE_DIR"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/456" Enter
+  send_cmd "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/456"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/pr-456-feature"
+  wait_cmd_done
 
   assert_dir_exists "$WORKTREE_PARENT/pr-456-feature"
   run get_tmux_windows
@@ -1095,11 +1218,12 @@ myrepo/existing"
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
   tmux rename-window -t "$first_window" "$shell_name"
 
-  tmux send-keys -t "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/123 ../myrepo/456" Enter
+  send_cmd "$TEST_SESSION" "cd $OUTSIDE_DIR && gwtmux ../myrepo/123 ../myrepo/456"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/pr-123-feat"
   confirm_branch_creation "$TEST_SESSION"
   wait_for_dir_exists "$WORKTREE_PARENT/pr-456-fix"
+  wait_cmd_done
 
   run get_tmux_windows
   assert_output --partial "myrepo/pr-123-feat"
@@ -1140,8 +1264,9 @@ myrepo/existing"
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/old-name" -c "$WORKTREE_PARENT/old-name" -P -F "#{window_id}")
 
   # Rename (run from the worktree's own window - gwtmux targets the invoking window)
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/old-name && gwtmux --rename new-name" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/old-name && gwtmux --rename new-name"
   wait_for_dir_exists "$WORKTREE_PARENT/new-name"
+  wait_cmd_done
 
   # Verify directory renamed
   assert_dir_exists "$WORKTREE_PARENT/new-name"
@@ -1174,8 +1299,9 @@ myrepo/existing"
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/old-name" -c "$WORKTREE_PARENT/old-name" -P -F "#{window_id}")
 
   # Invoked from a nested subdir - should still act on the worktree root
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/old-name/src/deep && gwtmux --rename new-name" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/old-name/src/deep && gwtmux --rename new-name"
   wait_for_dir_exists "$WORKTREE_PARENT/new-name"
+  wait_cmd_done
 
   assert_dir_exists "$WORKTREE_PARENT/new-name"
   refute [ -d "$WORKTREE_PARENT/old-name" ]
@@ -1204,8 +1330,9 @@ myrepo/existing"
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/old-name" -c "$WORKTREE_PARENT/old-name" -P -F "#{window_id}")
 
   # Rename
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/old-name && gwtmux --rename new-name" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/old-name && gwtmux --rename new-name"
   wait_for_dir_exists "$WORKTREE_PARENT/new-name"
+  wait_cmd_done
 
   # Verify remote branch was renamed
   run git -C "$MAIN_REPO" branch -r
@@ -1231,8 +1358,9 @@ myrepo/existing"
 
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/old-name" -c "$WORKTREE_PARENT/old-name" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/old-name && gwtmux --rename feature/new-name" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/old-name && gwtmux --rename feature/new-name"
   wait_for_dir_exists "$WORKTREE_PARENT/feature_new-name"
+  wait_cmd_done
 
   # Directory should use underscores
   assert_dir_exists "$WORKTREE_PARENT/feature_new-name"
@@ -1266,8 +1394,9 @@ myrepo/existing"
 
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/feat-x" -c "$WORKTREE_PARENT/wrong-dir" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/wrong-dir && gwtmux --rename feat-x" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/wrong-dir && gwtmux --rename feat-x"
   wait_for_dir_exists "$WORKTREE_PARENT/feat-x"
+  wait_cmd_done
 
   assert_dir_exists "$WORKTREE_PARENT/feat-x"
   refute [ -d "$WORKTREE_PARENT/wrong-dir" ]
@@ -1298,8 +1427,9 @@ myrepo/existing"
 
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/foo" -c "$WORKTREE_PARENT/somewhere" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/somewhere && gwtmux --rename baz" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/somewhere && gwtmux --rename baz"
   wait_for_dir_exists "$WORKTREE_PARENT/baz"
+  wait_cmd_done
 
   run git -C "$WORKTREE_PARENT/baz" branch --show-current
   assert_output "baz"
@@ -1332,8 +1462,9 @@ myrepo/existing"
 
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/foo" -c "$WORKTREE_PARENT/somewhere" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/somewhere && gwtmux --rename bar" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/somewhere && gwtmux --rename bar"
   wait_for_dir_exists "$WORKTREE_PARENT/bar"
+  wait_cmd_done
 
   run git -C "$WORKTREE_PARENT/bar" branch --show-current
   assert_output "bar"
@@ -1361,8 +1492,9 @@ myrepo/existing"
 
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/baz" -c "$WORKTREE_PARENT/baz" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/baz && gwtmux --rename baz 2>&1; echo EXIT_CODE:\$?" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/baz && gwtmux --rename baz 2>&1; echo EXIT_CODE:\$?"
   wait_until "tmux capture-pane -t '$new_window' -p | grep -qE 'EXIT_CODE:[0-9]'"
+  wait_cmd_done
 
   run tmux capture-pane -t "$new_window" -p
   assert_output --partial "EXIT_CODE:0"
@@ -1391,8 +1523,9 @@ myrepo/existing"
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/old-branch" -c "$WORKTREE_PARENT/baz" -P -F "#{window_id}")
 
   # Must not fail with "already exists" - the target dir is this worktree
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/baz && gwtmux --rename baz 2>&1; echo EXIT_CODE:\$?" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/baz && gwtmux --rename baz 2>&1; echo EXIT_CODE:\$?"
   wait_until "tmux capture-pane -t '$new_window' -p | grep -qE 'EXIT_CODE:[0-9]'"
+  wait_cmd_done
 
   run tmux capture-pane -t "$new_window" -p
   assert_output --partial "EXIT_CODE:0"
@@ -1422,8 +1555,9 @@ myrepo/existing"
 
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/foo" -c "$WORKTREE_PARENT/foo" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/foo && gwtmux --rename baz 2>&1; echo EXIT_CODE:\$?" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/foo && gwtmux --rename baz 2>&1; echo EXIT_CODE:\$?"
   wait_until "tmux capture-pane -t '$new_window' -p | grep -qE 'EXIT_CODE:[0-9]'"
+  wait_cmd_done
 
   run tmux capture-pane -t "$new_window" -p
   assert_output --partial "Warning: could not delete"
@@ -1454,8 +1588,9 @@ myrepo/existing"
 
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/feat-y" -c "$WORKTREE_PARENT/review-dir" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/review-dir && gwtmux --rename feat-y" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/review-dir && gwtmux --rename feat-y"
   wait_for_dir_exists "$WORKTREE_PARENT/feat-y"
+  wait_cmd_done
 
   assert_dir_exists "$WORKTREE_PARENT/feat-y"
   run git -C "$REMOTE_REPO" branch
@@ -1599,10 +1734,11 @@ myrepo/existing"
   git config user.email "test@example.com"
 
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
-  local window_count_before=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local window_count_before=$(get_window_count)
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d"
   wait_for_window_closed "myrepo/test-branch"
+  wait_cmd_done
 
   # Worktree should still exist
   assert [ -d "$WORKTREE_PARENT/test-wt" ]
@@ -1612,7 +1748,7 @@ myrepo/existing"
   assert_output --partial "test-branch"
 
   # Window should be killed
-  local window_count_after=$(tmux list-windows -t "$TEST_SESSION" 2>/dev/null | wc -l)
+  local window_count_after=$(get_window_count)
   assert [ "$window_count_after" -lt "$window_count_before" ]
 }
 
@@ -1637,8 +1773,9 @@ myrepo/existing"
   cd "$WORKTREE_PARENT/test-wt"
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wb" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wb"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+  wait_cmd_done
 
   # Both worktree and branch should be removed
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
@@ -1656,8 +1793,9 @@ myrepo/existing"
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
   # Invoked from a nested subdir - should still remove the whole worktree
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt/src/deep && gwtmux -d -wB" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt/src/deep && gwtmux -d -wB"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+  wait_cmd_done
 
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
   run git -C "$MAIN_REPO" branch
@@ -1698,8 +1836,9 @@ myrepo/existing"
 
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wB" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wB"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+  wait_cmd_done
 
   # Both should be removed despite not being merged
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
@@ -1728,8 +1867,9 @@ myrepo/existing"
   cd "$WORKTREE_PARENT/test-wt"
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wbr" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wbr"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+  wait_cmd_done
 
   # Local and remote should be deleted
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
@@ -1752,8 +1892,9 @@ myrepo/existing"
 
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wBr" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wBr"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+  wait_cmd_done
 
   # Everything should be deleted
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
@@ -1782,8 +1923,9 @@ myrepo/existing"
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
   # Try -rbw instead of -wbr
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -rbw" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -rbw"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+  wait_cmd_done
 
   # Should work the same
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
@@ -1813,8 +1955,9 @@ myrepo/existing"
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
   # Try to delete with -wbr (should succeed even though no remote)
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wbr" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wbr"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+  wait_cmd_done
 
   # Should complete without error
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
@@ -1848,8 +1991,9 @@ myrepo/existing"
   cd "$WORKTREE_PARENT/test-wt"
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wb" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wb"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+  wait_cmd_done
 
   # Should succeed
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
@@ -1894,8 +2038,9 @@ myrepo/existing"
   cd "$WORKTREE_PARENT/test-wt"
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wb" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wb"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+  wait_cmd_done
 
   # Should succeed using master
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
@@ -1929,16 +2074,17 @@ myrepo/existing"
 
   # Create a second window so we have multiple
   tmux new-window -t "$TEST_SESSION" -n "test-window" -c "$MAIN_REPO" 2>/dev/null
-  local window_count_before=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local window_count_before=$(get_window_count)
   assert [ "$window_count_before" -gt 1 ]
 
   # Get the second window ID and run gwtmux -d from it
   local second_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | tail -1)
-  tmux send-keys -t "$second_window" "cd $MAIN_REPO && gwtmux -d" Enter
+  send_cmd "$second_window" "cd $MAIN_REPO && gwtmux -d"
   wait_for_window_closed "test-window"
+  wait_cmd_done
 
   # Window should be killed (since we have multiple windows)
-  local window_count_after=$(tmux list-windows -t "$TEST_SESSION" 2>/dev/null | wc -l)
+  local window_count_after=$(get_window_count)
   assert [ "$window_count_after" -lt "$window_count_before" ]
 }
 
@@ -1969,8 +2115,9 @@ myrepo/existing"
 
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -w" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -w"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+  wait_cmd_done
 
   # Worktree should be removed
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
@@ -1990,18 +2137,19 @@ myrepo/existing"
   git config user.email "test@example.com"
 
   # Ensure we only have one window
-  local window_count_before=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local window_count_before=$(get_window_count)
   assert [ "$window_count_before" -eq 1 ]
 
   # Get the actual window ID and expected shell name
   local window_id=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
   local expected_shell=$(basename "${SHELL:-zsh}")
 
-  tmux send-keys -t "$window_id" "cd $WORKTREE_PARENT/test-wt && gwtmux -d" Enter
+  send_cmd "$window_id" "cd $WORKTREE_PARENT/test-wt && gwtmux -d"
   wait_until "[ \"\$(tmux display-message -t '$window_id' -p '#W')\" = '$expected_shell' ]"
+  wait_cmd_done
 
   # Window should still exist
-  local window_count_after=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local window_count_after=$(get_window_count)
   assert [ "$window_count_after" -eq 1 ]
 
   # Window should be renamed to shell name
@@ -2019,20 +2167,25 @@ myrepo/existing"
   git config user.email "test@example.com"
 
   # Ensure we only have one window
-  local window_count=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local window_count=$(get_window_count)
   assert [ "$window_count" -eq 1 ]
 
   # Get the actual window ID
   local window_id=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
 
   # Execute gwtmux -d and capture PWD after
-  tmux send-keys -t "$window_id" "cd $WORKTREE_PARENT/test-wt && gwtmux -d && pwd > /tmp/gwtmux_done_pwd_$$" Enter
-  wait_until "[ -f /tmp/gwtmux_done_pwd_$$ ]"
+  # Marker lives in the per-test dir, not /tmp: keyed on the bats PID it
+  # outlives an interrupted run, and a later run that is given the same PID
+  # would read the previous run's path and assert against a temp dir that no
+  # longer exists. bats removes this directory for us.
+  local done_pwd="$TEST_TEMP_DIR/done_pwd"
+  send_cmd "$window_id" "cd $WORKTREE_PARENT/test-wt && gwtmux -d && pwd > '$done_pwd'"
+  wait_until "[ -f '$done_pwd' ]"
+  wait_cmd_done
 
   # Verify we're in the parent directory
-  run cat "/tmp/gwtmux_done_pwd_$$"
+  run cat "$done_pwd"
   assert_output "$WORKTREE_PARENT"
-  rm -f "/tmp/gwtmux_done_pwd_$$"
 }
 
 @test "gwtmux -d: kills window when multiple windows exist" {
@@ -2046,14 +2199,15 @@ myrepo/existing"
 
   # Create a second window so we have multiple
   local new_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-branch" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}")
-  local window_count_before=$(tmux list-windows -t "$TEST_SESSION" | wc -l)
+  local window_count_before=$(get_window_count)
   assert [ "$window_count_before" -gt 1 ]
 
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d"
   wait_for_window_closed "myrepo/test-branch"
+  wait_cmd_done
 
   # Window should be killed
-  local window_count_after=$(tmux list-windows -t "$TEST_SESSION" 2>/dev/null | wc -l)
+  local window_count_after=$(get_window_count)
   assert [ "$window_count_after" -lt "$window_count_before" ]
 }
 
@@ -2069,8 +2223,9 @@ myrepo/existing"
   # Focus a different window - gwtmux must still act on the window it runs in
   tmux select-window -t "$bystander"
 
-  tmux send-keys -t "$wt_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d" Enter
+  send_cmd "$wt_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d"
   wait_for_window_closed "myrepo/test-branch"
+  wait_cmd_done
 
   # The worktree's window is gone, the focused bystander window survives
   run get_tmux_windows
@@ -2190,11 +2345,12 @@ myrepo/existing"
   local window_id=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
 
   # Execute via tmux send-keys so gwtmux has proper tmux context
-  tmux send-keys -t "$window_id" "cd $MAIN_REPO && gwtmux -d wt-a wt-b" Enter
+  send_cmd "$window_id" "cd $MAIN_REPO && gwtmux -d wt-a wt-b"
 
   # Windows should be closed (wait for async command)
   wait_for_window_closed "myrepo/wt-a"
   wait_for_window_closed "myrepo/wt-b"
+  wait_cmd_done
   run get_tmux_windows
   refute_output --partial "myrepo/wt-a"
   refute_output --partial "myrepo/wt-b"
@@ -2265,10 +2421,11 @@ myrepo/existing"
   sleep 0.1  # Wait for shell to be ready
 
   # Run without arguments (original behavior)
-  tmux send-keys -t "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -dwb" Enter
+  send_cmd "$new_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -dwb"
 
   # Should delete current worktree (wait for async tmux command)
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+  wait_cmd_done
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
   run git -C "$MAIN_REPO" branch
   refute_output --partial "test-branch"
@@ -2493,12 +2650,14 @@ myrepo/existing"
 
   # From wt-3, delete wt-2 and wt-3 (current worktree is included)
   # Use a temp file to capture if the command completed
-  local marker_file="/tmp/gwtmux_multi_delete_$$"
-  tmux send-keys -t "$wt3_window" "cd $WORKTREE_PARENT/wt-3 && gwtmux -dwB wt-2 wt-3 && echo done > $marker_file" Enter
+  # Per-test dir rather than /tmp keyed on the bats PID - see the -d PWD test.
+  local marker_file="$TEST_TEMP_DIR/multi_delete"
+  send_cmd "$wt3_window" "cd $WORKTREE_PARENT/wt-3 && gwtmux -dwB wt-2 wt-3 && echo done > '$marker_file'"
 
   # Wait for both worktrees to be deleted
   wait_for_dir_deleted "$WORKTREE_PARENT/wt-2"
   wait_for_dir_deleted "$WORKTREE_PARENT/wt-3"
+  wait_cmd_done
 
   # Both worktrees should be deleted
   refute [ -d "$WORKTREE_PARENT/wt-2" ]
@@ -2533,16 +2692,17 @@ myrepo/existing"
   git worktree add "$WORKTREE_PARENT/parent-wt/nested2" -b nested2 main >/dev/null 2>&1
 
   # Open tmux window for parent
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/parent-wt" -c "$WORKTREE_PARENT/parent-wt" 2>/dev/null
+  local wt_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/parent-wt" -c "$WORKTREE_PARENT/parent-wt" -P -F "#{window_id}" 2>/dev/null)
 
   # Run delete from parent worktree
-  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/parent-wt && gwtmux -d -wB" Enter
+  send_cmd "$wt_window" "cd $WORKTREE_PARENT/parent-wt && gwtmux -d -wB"
 
   # Confirm nested removal
-  confirm_nested_worktree_removal "$TEST_SESSION:1"
+  confirm_nested_worktree_removal "$wt_window"
 
   # Wait for parent to be deleted
   wait_for_dir_deleted "$WORKTREE_PARENT/parent-wt"
+  wait_cmd_done
 
   # All worktrees should be gone
   refute [ -d "$WORKTREE_PARENT/parent-wt" ]
@@ -2565,13 +2725,14 @@ myrepo/existing"
   git worktree add "$WORKTREE_PARENT/parent-wt/nested1" -b nested1 main >/dev/null 2>&1
 
   # Open tmux window for parent
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/parent-wt" -c "$WORKTREE_PARENT/parent-wt" 2>/dev/null
+  local wt_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/parent-wt" -c "$WORKTREE_PARENT/parent-wt" -P -F "#{window_id}" 2>/dev/null)
 
   # Run delete from parent worktree
-  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/parent-wt && gwtmux -d -wB" Enter
+  send_cmd "$wt_window" "cd $WORKTREE_PARENT/parent-wt && gwtmux -d -wB"
 
   # Deny nested removal
-  deny_nested_worktree_removal "$TEST_SESSION:1"
+  deny_nested_worktree_removal "$wt_window"
+  wait_cmd_done
   sleep 0.5
 
   # Everything should still exist
@@ -2590,11 +2751,12 @@ myrepo/existing"
 
   git worktree add "$WORKTREE_PARENT/test-wt" -b test-wt main >/dev/null 2>&1
 
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/test-wt" -c "$WORKTREE_PARENT/test-wt" 2>/dev/null
+  local wt_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/test-wt" -c "$WORKTREE_PARENT/test-wt" -P -F "#{window_id}" 2>/dev/null)
 
   # This should work without any prompt
-  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wB" Enter
+  send_cmd "$wt_window" "cd $WORKTREE_PARENT/test-wt && gwtmux -d -wB"
   wait_for_dir_deleted "$WORKTREE_PARENT/test-wt"
+  wait_cmd_done
 
   refute [ -d "$WORKTREE_PARENT/test-wt" ]
 }
@@ -2610,12 +2772,13 @@ myrepo/existing"
   local commit_hash=$(git -C "$MAIN_REPO" rev-parse HEAD)
   git worktree add --detach "$WORKTREE_PARENT/parent-wt/tmp/abc123" "$commit_hash" >/dev/null 2>&1
 
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/parent-wt" -c "$WORKTREE_PARENT/parent-wt" 2>/dev/null
+  local wt_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/parent-wt" -c "$WORKTREE_PARENT/parent-wt" -P -F "#{window_id}" 2>/dev/null)
 
-  tmux send-keys -t "$TEST_SESSION:1" "cd $WORKTREE_PARENT/parent-wt && gwtmux -d -wB" Enter
+  send_cmd "$wt_window" "cd $WORKTREE_PARENT/parent-wt && gwtmux -d -wB"
 
-  confirm_nested_worktree_removal "$TEST_SESSION:1"
+  confirm_nested_worktree_removal "$wt_window"
   wait_for_dir_deleted "$WORKTREE_PARENT/parent-wt"
+  wait_cmd_done
 
   refute [ -d "$WORKTREE_PARENT/parent-wt" ]
 
@@ -2641,11 +2804,12 @@ myrepo/existing"
   tmux new-window -t "$TEST_SESSION" -n "runner" -c "$MAIN_REPO" 2>/dev/null
   local runner_window="$TEST_SESSION:runner"
 
-  tmux send-keys -t "$runner_window" "gwtmux -dwB wt-a wt-b" Enter
+  send_cmd "$runner_window" "gwtmux -dwB wt-a wt-b"
 
   confirm_nested_worktree_removal "$runner_window"
   wait_for_dir_deleted "$WORKTREE_PARENT/wt-a"
   wait_for_dir_deleted "$WORKTREE_PARENT/wt-b"
+  wait_cmd_done
 
   refute [ -d "$WORKTREE_PARENT/wt-a" ]
   refute [ -d "$WORKTREE_PARENT/wt-b" ]
@@ -2670,9 +2834,10 @@ myrepo/existing"
   tmux new-window -t "$TEST_SESSION" -n "runner" -c "$MAIN_REPO" 2>/dev/null
   local runner_window="$TEST_SESSION:runner"
 
-  tmux send-keys -t "$runner_window" "gwtmux -dwB wt-a" Enter
+  send_cmd "$runner_window" "gwtmux -dwB wt-a"
 
   deny_nested_worktree_removal "$runner_window"
+  wait_cmd_done
   sleep 0.5
 
   # Everything should still exist
