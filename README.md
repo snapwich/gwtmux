@@ -51,6 +51,7 @@ run gwtmux inside a submodule.
 | `-dwB <name>`              | yes, any worktree       | yes, any worktree       |
 | `--rename` in worktree     | yes                     | yes                     |
 | `--rename` at root         | error                   | error                   |
+| `-l`, `-f`                 | yes                     | yes                     |
 
 ### Window names
 
@@ -67,7 +68,8 @@ locations get the same window name.
 
 ## Features
 
-- **Create worktrees**: Open branches or PRs in new tmux windows with `gwtmux <branch>`
+- **Create worktrees**: Open branches or PRs in new tmux windows with `gwtmux <branch>`, or
+  create a worktree at a new path with `gwtmux ./<dir>`
 - **PR support**: Pass a PR number and gwtmux resolves the branch name via GitHub CLI
 - **Batch operations**: Open multiple worktrees at once with `gwtmux branch1 branch2 branch3`
 - **Cleanup**: Remove worktrees, delete branches (local/remote), and close tmux windows
@@ -152,11 +154,32 @@ default               main
 
 gwtmux walks down from the root to find repos, and also includes the repo that
 the root is inside of. It then lists every worktree of each repo, including
-worktrees outside the root. When the root is the current directory or below it,
-paths are relative to the current directory. Otherwise they are absolute, with
-`~` for `$HOME`. You can give any of them to `gwtmux <path>`. `*` marks a worktree that has a window
-open in the current tmux session, `(missing)` a worktree whose directory is
-gone, and `(bare)` a bare repo. `node_modules/` and submodules are skipped.
+worktrees outside the root.
+
+When the root is the current directory or below it, paths are relative to the
+current directory. Otherwise they are absolute, with `~` for `$HOME`. You can
+give any path to `gwtmux <path>`.
+
+| marker      | meaning                                               |
+| ----------- | ----------------------------------------------------- |
+| `*`         | the worktree has a window in the current tmux session |
+| `(missing)` | the worktree directory does not exist                 |
+| `(bare)`    | the repo is bare                                      |
+
+The walk skips:
+
+- `node_modules/` and submodules
+- mounts below the root that are virtual (`/proc`, `/sys`, `/dev`), remote
+  (NFS, CIFS, SSHFS), snap images, or Windows drives on WSL (`/mnt/c`)
+- a second mount of the disk that holds the root (WSL mounts the distro again
+  at `/mnt/wslg/distro`)
+
+Thus `gwtmux -l /` finishes quickly. A root that you give is never skipped:
+`gwtmux -l /mnt/c/src` walks that directory. Mount skipping works on Linux
+only.
+
+If `fd` is installed, gwtmux uses it for the walk. `fd` is much faster than
+`find` on large trees.
 
 ### Pick with fzf
 
@@ -166,8 +189,9 @@ gwtmux -f ~/repos
 ```
 
 `-f` shows the `-l` tree in fzf. Select one or more worktrees (Tab for
-multi-select) and gwtmux opens a window for each. The preview shows
-`git status` and the recent log. Missing worktrees are not shown.
+multi-select) and gwtmux opens a window for each. Esc cancels. The preview
+shows `git status -sb` and the last 100 commits. Missing worktrees are not
+shown. You can see bare repos, but you cannot select them.
 
 To open the picker from anywhere, set `GWTMUX_ROOT` and bind it to a popup:
 
@@ -178,6 +202,9 @@ export GWTMUX_ROOT=~/repos
 ```tmux
 bind-key g display-popup -E -w 80% -h 60% "zsh -ic 'gwtmux -f'"
 ```
+
+From a popup, gwtmux always opens new windows. It does not reuse the shell
+window behind the popup.
 
 ### Cleanup (Done Mode)
 
