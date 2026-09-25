@@ -24,12 +24,10 @@ A repo that has no `<parent>/default/` wrapper is a **flat repo**, for example a
 `~/repos/myrepo`. gwtmux finds a flat repo by the name of the repo root directory: a root that has
 the name `default` follows the convention above, all other names are flat.
 
-In a flat repo, gwtmux manages only tmux windows. It creates no worktrees, because a flat repo has
-no parent directory that can hold them. All other operations work: open a window by path, open a
-window for each worktree, clean up with `-d`, and rename in a worktree that you made with
-`git worktree add`.
-
-A flat repo does not fetch, because it resolves no branch from a remote.
+In a flat repo, `gwtmux <branch>` is an error, because a flat repo has no parent directory that
+can hold the worktree. To create a worktree, give an explicit new path: `gwtmux ./feature-x`. All
+other operations work: open a window by path, open a window for each worktree, clean up with `-d`,
+and rename.
 
 Submodules are not supported. gwtmux resolves the repo root from
 `git rev-parse --git-common-dir`, which inside a submodule points at
@@ -45,6 +43,7 @@ run gwtmux inside a submodule.
 | -------------------------- | ----------------------- | ----------------------- |
 | `gwtmux <branch>` / `<pr>` | yes                     | error                   |
 | `gwtmux <path>`            | yes                     | yes, opens window       |
+| `gwtmux ./<new dir>`       | yes                     | yes                     |
 | `gwtmux` (no args)         | from parent dir         | from inside repo        |
 | `-d`                       | yes                     | yes                     |
 | `-dw` on root              | error                   | error                   |
@@ -72,6 +71,8 @@ locations get the same window name.
 - **PR support**: Pass a PR number and gwtmux resolves the branch name via GitHub CLI
 - **Batch operations**: Open multiple worktrees at once with `gwtmux branch1 branch2 branch3`
 - **Cleanup**: Remove worktrees, delete branches (local/remote), and close tmux windows
+- **List**: Show all worktrees under a directory as a tree with `gwtmux -l`
+- **Pick**: Fuzzy-find worktrees with fzf and open them with `gwtmux -f`
 - **Rename**: Atomically rename worktree directory, branch, remote tracking, and tmux window
 
 ## Dependencies
@@ -84,6 +85,8 @@ locations get the same window name.
 **Optional:**
 
 - `gh` (GitHub CLI) - enables PR number support
+- `fd` - makes `gwtmux -l` faster on large trees (falls back to `find`)
+- `fzf` - enables `gwtmux -f`
 
 ## Installation
 
@@ -115,13 +118,66 @@ gwtmux
 
 # Open an existing worktree by path
 gwtmux ../other-worktree
+
+# Create a worktree at a new path (branch = the last path component)
+gwtmux ./scratch/feature-x
 ```
 
 An argument counts as a path when it has the shape of a path (`/...`, `./...`,
 `../...`, `.` or `..`) or when it is the root of a worktree. A path argument
-must be that root: a subdirectory of a worktree is an error, and so is a
-path-shaped argument that is no worktree at all. Thus a branch name that
-contains a slash, such as `feature/auth`, stays a branch name.
+must be that root: a subdirectory of a worktree is an error. Thus a branch
+name that contains a slash, such as `feature/auth`, stays a branch name.
+
+A path-shaped argument that does not exist creates a worktree at that path.
+The parent directory must exist. The repo is the repo that holds the parent
+directory, and the branch name is the last path component. If the parent is a
+repo parent (it holds `default/`), gwtmux uses the `<repo>/<branch>` rule
+instead.
+
+### List
+
+```bash
+# Tree of all worktrees from cwd down (or from a root path)
+gwtmux -l
+gwtmux --list ~/repos
+```
+
+```
+$ cd ~/repos/myrepo && gwtmux -l
+default               main
+├── ../../scratch/x   x
+└── feat              feat  *
+    └── feat/sub      sub
+```
+
+gwtmux walks down from the root to find repos, and also includes the repo that
+the root is inside of. It then lists every worktree of each repo, including
+worktrees outside the root. When the root is the current directory or below it,
+paths are relative to the current directory. Otherwise they are absolute, with
+`~` for `$HOME`. You can give any of them to `gwtmux <path>`. `*` marks a worktree that has a window
+open in the current tmux session, `(missing)` a worktree whose directory is
+gone, and `(bare)` a bare repo. `node_modules/` and submodules are skipped.
+
+### Pick with fzf
+
+```bash
+gwtmux -f            # root: $GWTMUX_ROOT, else the current directory
+gwtmux -f ~/repos
+```
+
+`-f` shows the `-l` tree in fzf. Select one or more worktrees (Tab for
+multi-select) and gwtmux opens a window for each. The preview shows
+`git status` and the recent log. Missing worktrees are not shown.
+
+To open the picker from anywhere, set `GWTMUX_ROOT` and bind it to a popup:
+
+```bash
+export GWTMUX_ROOT=~/repos
+```
+
+```tmux
+bind-key g display-popup -E -w 80% -h 60% "zsh -ic 'gwtmux -f'"
+```
 
 ### Cleanup (Done Mode)
 

@@ -58,7 +58,8 @@ _gwtmux_worktree_root() {
 # read as a convention repo.
 # Args: <git_root>
 _gwtmux_is_flat() {
-  [[ "$(basename -- "$1")" != "default" ]]
+  local root="${1%/}"
+  [[ "${root##*/}" != "default" ]]
 }
 
 # Tell whether a directory is the root of a main git repo, rather than merely
@@ -95,50 +96,70 @@ _gwtmux_arg_is_path() {
 
 # Compute the tmux window name for a worktree. Single source of truth: every
 # naming site routes through here so one worktree always maps to one name.
-# Args: <worktree_path> [git_root] [branch]
+# Args: <worktree_path> [git_root] [branch] [known]
 #   git_root defaults to the main repo root resolved from <worktree_path>
 #   branch   defaults to <worktree_path>'s current branch
+#   known    1 = <worktree_path> is already physical (as git reports it) and
+#            <branch> is authoritative, empty meaning detached: skips the
+#            subshell and git call, which gwtmux -l would pay per worktree
 # Callers that name a worktree before creating it must pass both optional args,
 # since neither can be read from a path that does not exist yet.
-_gwtmux_window_name() {
-  local wt_path="$1" git_root="${2:-}" branch="${3:-}"
-  local git_common_dir parent_name resolved_path
+# Path parts are cut with parameter expansion, not basename/dirname: those are
+# processes, and this runs once per worktree in gwtmux -l.
+# Sets REPLY (declare "local REPLY" first) instead of printing, so a caller in
+# a loop pays no subshell; _gwtmux_window_name below is the printing form.
+_gwtmux_window_name_r() {
+  local wt_path="$1" git_root="${2:-}" branch="${3:-}" known="${4:-0}"
+  local git_common_dir parent_dir resolved_path
 
   if [[ -z "$git_root" ]]; then
     git_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$wt_path")" || return 1
-    git_root="$(dirname -- "$git_common_dir")"
+    git_root="${git_common_dir%/*}"
   fi
+  git_root="${git_root%/}"
 
-  resolved_path="$(cd "$wt_path" 2>/dev/null && pwd -P)"
-  [[ -z "$resolved_path" ]] && resolved_path="$wt_path"
+  if [[ $known -eq 1 ]]; then
+    resolved_path="$wt_path"
+  else
+    resolved_path="$(cd "$wt_path" 2>/dev/null && pwd -P)"
+    [[ -z "$resolved_path" ]] && resolved_path="$wt_path"
+  fi
+  resolved_path="${resolved_path%/}"
 
   # Flat repo: the repo directory names its own window, and its worktrees hang
   # off that name by directory basename. Nothing here is branch-based, so an
   # in-place "git switch" never moves a window out from under the user.
   if _gwtmux_is_flat "$git_root"; then
     if [[ "$resolved_path" == "$git_root" ]]; then
-      echo "$(basename -- "$git_root")"
+      REPLY="${git_root##*/}"
     else
-      echo "$(basename -- "$git_root")/$(basename -- "$resolved_path")"
+      REPLY="${git_root##*/}/${resolved_path##*/}"
     fi
     return 0
   fi
 
-  parent_name="$(basename -- "$(dirname -- "$git_root")")"
+  parent_dir="${git_root%/*}"
 
   # The main repo root is named after its own directory ("<parent>/default"),
   # not after whatever branch happens to be checked out there.
   if [[ "$resolved_path" == "$git_root" ]]; then
-    echo "$parent_name/$(basename -- "$git_root")"
+    REPLY="${parent_dir##*/}/${git_root##*/}"
     return 0
   fi
 
-  [[ -z "$branch" ]] && branch="$(git -C "$wt_path" branch --show-current 2>/dev/null)"
+  [[ -z "$branch" && $known -eq 0 ]] && branch="$(git -C "$wt_path" branch --show-current 2>/dev/null)"
   # Detached HEAD: there is no branch to name the window after, so use the
   # directory basename instead of a trailing-slash name like "myrepo/".
-  [[ -z "$branch" ]] && branch="$(basename -- "$resolved_path")"
+  [[ -z "$branch" ]] && branch="${resolved_path##*/}"
 
-  echo "$parent_name/$branch"
+  REPLY="${parent_dir##*/}/$branch"
+}
+
+# Printing form of _gwtmux_window_name_r, same args.
+_gwtmux_window_name() {
+  local REPLY=""
+  _gwtmux_window_name_r "$@" || return 1
+  echo "$REPLY"
 }
 
 # Dependency check helper
@@ -468,6 +489,378 @@ _gwtmux_remove_nested_worktrees() {
   done
 }
 
+# Print the mount points strictly below <root> whose filesystem is virtual
+# (proc, sys, dev), remote (nfs, cifs, sshfs) or a WSL Windows drive (9p,
+# drvfs), plus second mounts of the disk <root> is on. A walk of "/" on WSL crosses into C:\ over 9P, where every directory
+# read leaves the VM: minutes, where the Linux side takes a second. Local disks
+# of any kind, tmpfs included, are still walked. <root> itself is never listed,
+# so "gwtmux -l /mnt/c/src" still works. Linux only; elsewhere prints nothing.
+# Args: <root> (absolute, physical)
+_gwtmux_skip_mounts() {
+  local root="${1%/}" dev mp fstype rest root_dev="" root_mp=""
+  [[ -r /proc/self/mounts ]] || return 0
+  # The block device holding root (longest mount point at or above it)
+  while read -r dev mp fstype rest; do
+    if [[ "$root/" == "${mp%/}/"* && ${#mp} -ge ${#root_mp} ]]; then
+      root_mp="$mp" root_dev="$dev"
+    fi
+  done </proc/self/mounts
+  while read -r dev mp fstype rest; do
+    [[ "$mp" == "$root"/?* ]] || continue
+    # The disk root is on, mounted again below it (WSL mounts the distro at
+    # /mnt/wslg/distro; bind mounts do the same): every repo would list twice.
+    if [[ "$dev" == /dev/* && "$dev" == "$root_dev" ]]; then
+      printf '%s\n' "$mp"
+      continue
+    fi
+    case "$fstype" in
+    9p | drvfs | proc | sysfs | devtmpfs | devpts | cgroup | cgroup2 | debugfs | \
+      tracefs | securityfs | pstore | bpf | configfs | fusectl | binfmt_misc | \
+      hugetlbfs | mqueue | nsfs | autofs | efivarfs | nfs | nfs4 | cifs | smb3 | \
+      smbfs | fuse.sshfs | fuse.rclone | fuse.snapfuse | fuse.s3fs | fuse.gvfsd-fuse)
+      printf '%s\n' "$mp"
+      ;;
+    esac
+  done </proc/self/mounts
+}
+
+# Print every .git entry (dir or file) under <root>, without descending into
+# .git dirs, node_modules, or the mounts _gwtmux_skip_mounts names. fd walks in
+# parallel and is ~8x faster than find over a home directory, so it is used
+# when installed ("fdfind" on Debian).
+# Args: <root> (absolute, physical)
+_gwtmux_find_git_entries() {
+  local root="${1%/}" fd_cmd="" mp
+  local -a fd_skip=() find_skip=()
+  while IFS= read -r mp; do
+    # fd anchors a leading "/" to the search root
+    fd_skip+=(--exclude "/${mp#"$root"/}")
+    find_skip+=(-path "$mp" -prune -o)
+  done < <(_gwtmux_skip_mounts "$root")
+
+  if command -v fd >/dev/null 2>&1; then
+    fd_cmd="fd"
+  elif command -v fdfind >/dev/null 2>&1; then
+    fd_cmd="fdfind"
+  fi
+  if [[ -n "$fd_cmd" ]]; then
+    "$fd_cmd" --hidden --no-ignore --prune --exclude node_modules "${fd_skip[@]}" '^\.git$' "$1" 2>/dev/null
+  else
+    find "$1" "${find_skip[@]}" -name node_modules -prune -o -name .git -print -prune 2>/dev/null
+  fi
+}
+
+# Print "git worktree list --porcelain" for the repo whose common dir is
+# <common>, read from its files (gitrepository-layout) instead of by running
+# git: from "/" that is ~1400 repos and one process each was nearly all of the
+# run time. Only the plain layout is read here - a ".git" common dir, absolute
+# worktree gitdir links, HEAD files. Anything else (bare repo, relative links,
+# reftable HEAD stubs) is left to git itself.
+# Sets REPLY (declare "local REPLY" first): gwtmux -l calls this per repo, and
+# printing would mean a subshell per repo to capture it.
+# Args: <common>
+_gwtmux_worktree_porcelain() {
+  local common="$1" head gd d
+  local out="" ok=1
+  [[ -n "${ZSH_VERSION:-}" ]] && setopt local_options null_glob
+
+  [[ "${common##*/}" == ".git" ]] || ok=0
+  # What git itself requires of a repo dir (is_git_directory); a stray .git
+  # dir holding only a HEAD file is no repo, and git lists nothing for it.
+  REPLY=""
+  [[ -d "$common/objects" && -d "$common/refs" ]] || return 0
+  if [[ $ok -eq 1 ]] && read -r head 2>/dev/null <"$common/HEAD"; then
+    case "$head" in
+    "ref: refs/heads/.invalid") ok=0 ;;
+    "ref: refs/heads/"*) out+="worktree ${common%/*}"$'\n'"branch ${head#ref: }"$'\n\n' ;;
+    *) out+="worktree ${common%/*}"$'\n'"HEAD $head"$'\n'"detached"$'\n\n' ;;
+    esac
+  else
+    ok=0
+  fi
+
+  if [[ $ok -eq 1 && -d "$common/worktrees" ]]; then
+    for d in "$common"/worktrees/*; do
+      [[ -d "$d" ]] || continue
+      # 2>/dev/null before the "<": redirects apply left to right, so a
+      # missing file would report before stderr is silenced.
+      if ! read -r gd 2>/dev/null <"$d/gitdir" || [[ "$gd" != /* ]] ||
+        ! read -r head 2>/dev/null <"$d/HEAD" || [[ "$head" == "ref: refs/heads/.invalid" ]]; then
+        ok=0
+        break
+      fi
+      out+="worktree ${gd%/.git}"$'\n'
+      case "$head" in
+      "ref: refs/heads/"*) out+="branch ${head#ref: }"$'\n' ;;
+      *) out+="HEAD $head"$'\n'"detached"$'\n' ;;
+      esac
+      [[ -e "$gd" ]] || out+="prunable gitdir file points to non-existent location"$'\n'
+      out+=$'\n'
+    done
+  fi
+
+  if [[ $ok -eq 1 ]]; then
+    REPLY="$out"
+  else
+    REPLY="$(git --git-dir="$common" worktree list --porcelain 2>/dev/null)"
+  fi
+}
+
+# List every worktree gwtmux can open from <root> down, grouped by repo, as a
+# tree. Repos are found by walking DOWN from <root> for .git entries (a dir is a
+# main repo, a file a linked worktree whose main repo may live anywhere), plus
+# the repo <root> itself is in. Nothing walks up for other repos. Each repo's
+# worktrees then come from git, so worktrees outside <root> show as "../" paths.
+# Paths print relative to $PWD, so any of them can be passed to "gwtmux <path>".
+# Reads the caller's gwt_session to mark worktrees with an open window.
+# Args: [root] [picker]
+#   root   defaults to $PWD
+#   picker 1 prefixes each line with "<absolute path>\t" for gwtmux -f
+
+_gwtmux_list() {
+  local root="${1:-.}" picker="${2:-0}" root_abs cwd_abs root_common="" common open_windows=""
+
+  root_abs="$(cd "$root" 2>/dev/null && pwd -P)"
+  if [[ -z "$root_abs" ]]; then
+    echo >&2 "Error: '$root' is not a directory"
+    return 1
+  fi
+  cwd_abs="$(pwd -P)"
+
+  # Keyed on --git-common-dir, not on the repo root: that is what every
+  # worktree of one repo agrees on, bare repos included.
+  if common="$(_gwtmux_git_dir_path --git-common-dir "$root_abs")" &&
+    [[ -z "$(git -C "$root_abs" rev-parse --show-superproject-working-tree 2>/dev/null)" ]]; then
+    root_common="$common"
+  fi
+
+  # Every window of the session, fetched once rather than once per worktree
+  if [[ -n "$TMUX" ]]; then
+    open_windows=$'\n'"$(tmux list-windows -t "$gwt_session" -F '#{window_name}' 2>/dev/null)"$'\n'
+  fi
+
+  # Resolve each .git hit to its common dir by reading git's on-disk layout
+  # (gitrepository-layout) in one awk, not with two git calls per hit - on a
+  # home directory that was most of the run time. A .git dir is a main repo. A
+  # .git file points at its gitdir; a linked worktree's gitdir has a commondir
+  # file naming the main repo. A gitdir under .git/modules/ is a submodule,
+  # which gwtmux refuses, so it is dropped.
+  local rows="" line wt_path wt_branch wt_head wt_bare wt_prunable is_main label markers git_root REPLY
+  while IFS= read -r common; do
+    [[ -z "$common" ]] && continue
+    git_root="${common%/*}"
+    is_main=1
+    wt_path=""
+    # Porcelain parsed in the shell. The trailing blank line closes the last
+    # record; a here-string, unlike "< <(...)", costs no subshell per repo.
+    REPLY=""
+    _gwtmux_worktree_porcelain "$common"
+    while IFS= read -r line; do
+      case "$line" in
+      "worktree "*)
+        wt_path="${line#worktree }" wt_branch="" wt_head="" wt_bare=0 wt_prunable=0
+        ;;
+      "HEAD "*) wt_head="${line#HEAD }" ;;
+      "branch refs/heads/"*) wt_branch="${line#branch refs/heads/}" ;;
+      bare) wt_bare=1 ;;
+      prunable*) wt_prunable=1 ;;
+      "")
+        [[ -z "$wt_path" ]] && continue
+        markers=""
+        if [[ $wt_bare -eq 1 ]]; then
+          label=""
+          markers="(bare)"
+        else
+          label="$wt_branch"
+          [[ -z "$label" ]] && label="(detached ${wt_head:0:7})"
+          # Every window name ends in the branch or the dir name, or is the
+          # repo dir name alone, so a worktree matching none of those cannot
+          # have a window: skip computing its name.
+          if [[ -n "$open_windows" ]] &&
+            [[ ( -n "$wt_branch" && "$open_windows" == *"/$wt_branch"$'\n'* ) ||
+              "$open_windows" == *"/${wt_path##*/}"$'\n'* ||
+              "$open_windows" == *$'\n'"${wt_path##*/}"$'\n'* ]]; then
+            REPLY=""
+            _gwtmux_window_name_r "$wt_path" "$git_root" "$wt_branch" 1
+            if [[ -n "$REPLY" && "$open_windows" == *$'\n'"$REPLY"$'\n'* ]]; then
+              markers="*"
+            fi
+          fi
+          if [[ $wt_prunable -eq 1 ]]; then
+            # The picker cannot open it; dropped here, before the tree
+            # layout, so no sibling keeps a branch glyph pointing at it.
+            if [[ $picker -eq 1 ]]; then
+              wt_path=""
+              continue
+            fi
+            markers="${markers:+$markers }(missing)"
+          fi
+        fi
+        rows+="$common"$'\t'"$wt_path"$'\t'"$label"$'\t'"$markers"$'\t'"$is_main"$'\n'
+        is_main=0
+        wt_path=""
+        ;;
+      esac
+    done <<<"$REPLY"$'\n'
+  done < <(
+    _gwtmux_find_git_entries "$root_abs" |
+      LC_ALL=C awk -v root_common="$root_common" '
+        function norm(p,    n, a, s, k, i, out) {
+          n = split(p, a, "/"); k = 0
+          for (i = 1; i <= n; i++) {
+            if (a[i] == "" || a[i] == ".") continue
+            if (a[i] == "..") { if (k > 0) k--; continue }
+            s[++k] = a[i]
+          }
+          out = ""
+          for (i = 1; i <= k; i++) out = out "/" s[i]
+          return out == "" ? "/" : out
+        }
+        function emit(c) { if (c != "" && !(c in seen)) { seen[c] = 1; print c } }
+        BEGIN { emit(root_common) }
+        {
+          # fd prints dirs with a trailing slash
+          hit = $0; sub(/\/$/, "", hit)
+          dir = hit; sub(/\/[^\/]*$/, "", dir)
+          line = ""
+          if ((getline line < (hit "/HEAD")) > 0) { close(hit "/HEAD"); emit(hit); next }
+          close(hit "/HEAD")
+          if ((getline line < hit) <= 0 || line !~ /^gitdir: /) { close(hit); next }
+          close(hit)
+          gd = substr(line, 9); if (gd !~ /^\//) gd = dir "/" gd
+          gd = norm(gd)
+          c = ""
+          if ((getline c < (gd "/commondir")) > 0) {
+            common = (c ~ /^\//) ? c : gd "/" c
+          } else common = gd
+          close(gd "/commondir")
+          common = norm(common)
+          if (common ~ /\/\.git\/modules\//) next
+          emit(common)
+        }
+      '
+  )
+
+  if [[ -z "$rows" ]]; then
+    echo >&2 "No worktrees found under $root_abs"
+    return 1
+  fi
+
+  # Tree layout in awk: arrays there index the same in bash and zsh. A worktree
+  # hangs off the deepest other worktree of its repo that contains it, else off
+  # the main worktree. Repos and siblings sort by path.
+  # Paths are relative to cwd while root is cwd or below it. A root above or
+  # beside cwd ("gwtmux -l /", a GWTMUX_ROOT popup) would give ../../.. chains,
+  # so those print absolute, with $HOME as "~". Either form pastes into
+  # "gwtmux <path>".
+  local abs=0 home_abs=""
+  if ! [[ "$root_abs" == "$cwd_abs" || "$root_abs" == "$cwd_abs"/* || "$cwd_abs" == / ]]; then
+    abs=1
+    # Physical, like the paths git reports
+    home_abs="$(cd "$HOME" 2>/dev/null && pwd -P)"
+    [[ "$home_abs" == / ]] && home_abs=""
+  fi
+  printf '%s' "$rows" | LC_ALL=C awk -F'\t' -v cwd="$cwd_abs" -v abs="$abs" -v home="$home_abs" -v picker="$picker" '
+    function rel(p,    a, b, na, nb, i, j, out) {
+      if (abs) {
+        if (home != "" && p == home) return "~"
+        if (home != "" && index(p, home "/") == 1) return "~" substr(p, length(home) + 1)
+        return p
+      }
+      if (p == cwd) return "."
+      na = split(cwd, a, "/"); nb = split(p, b, "/")
+      if (cwd == "/") na = 1
+      for (i = 2; i <= na && i <= nb && a[i] == b[i]; i++) ;
+      out = ""
+      for (j = i; j <= na; j++) out = out "../"
+      for (j = i; j <= nb; j++) out = out b[j] (j < nb ? "/" : "")
+      sub(/\/$/, "", out)
+      return out
+    }
+    # Display width. Run under LC_ALL=C so every awk counts bytes the same
+    # way, then drop UTF-8 continuation bytes to count characters.
+    function dlen(s) { gsub(/[\200-\277]/, "", s); return length(s) }
+    function pad(s, w) { while (dlen(s) < w) s = s " "; return s }
+    function sortidx(arr, n,    i, j, t) {
+      for (i = 2; i <= n; i++) for (j = i; j > 1 && P[arr[j-1]] > P[arr[j]]; j--) {
+        t = arr[j]; arr[j] = arr[j-1]; arr[j-1] = t
+      }
+    }
+    function walk(id, prefix, last, depth,    kids, n, i) {
+      if (depth == 0) L[++nl] = rel(P[id])
+      else L[++nl] = prefix (last ? "└── " : "├── ") rel(P[id])
+      LB[nl] = B[id]; LM[nl] = M[id]; LP[nl] = P[id]
+      n = NK[id]
+      for (i = 1; i <= n; i++) kids[i] = KID[id, i]
+      sortidx(kids, n)
+      for (i = 1; i <= n; i++)
+        walk(kids[i], depth == 0 ? "" : prefix (last ? "    " : "│   "), i == n, depth + 1)
+    }
+    {
+      N++; C[N] = $1; P[N] = $2; B[N] = $3; M[N] = $4
+      AT[$1, $2] = N
+      if ($5 == 1) { MAIN[$1] = N; roots[++nr] = N }
+    }
+    END {
+      # Parent = the nearest ancestor dir that is a worktree of the same repo,
+      # found by walking up the path through a hash, not by scanning all rows.
+      for (k = 1; k <= N; k++) {
+        if (k == MAIN[C[k]]) continue
+        par = MAIN[C[k]]; d = P[k]
+        while (sub(/\/[^\/]*$/, "", d) && d != "")
+          if ((C[k], d) in AT) { par = AT[C[k], d]; break }
+        KID[par, ++NK[par]] = k
+      }
+      sortidx(roots, nr)
+      for (r = 1; r <= nr; r++) walk(roots[r], "", 1, 0)
+      for (i = 1; i <= nl; i++) {
+        w = dlen(L[i]); if (w > lw) lw = w
+        w = dlen(LB[i]); if (w > bw) bw = w
+      }
+      for (i = 1; i <= nl; i++) {
+        line = pad(L[i], lw) "   " LB[i]
+        if (LM[i] != "") line = pad(L[i], lw) "   " pad(LB[i], bw) "  " LM[i]
+        sub(/ +$/, "", line)
+        if (!picker) { print line; continue }
+        # Picker rows: the path to open, then the line fzf shows. A bare
+        # header cannot be opened, so it gets an empty path.
+        print (LM[i] ~ /\(bare\)/ ? "" : LP[i]) "\t" line
+      }
+    }
+  '
+}
+
+# Pick worktrees with fzf and open them. fzf shows the -l tree and matches on
+# it, but returns the hidden first column, so the tree text is never parsed.
+# Args: [root] (defaults to $GWTMUX_ROOT, then $PWD)
+_gwtmux_pick() {
+  if ! command -v fzf >/dev/null 2>&1; then
+    echo >&2 "Error: gwtmux -f requires fzf"
+    return 1
+  fi
+
+  local rows picked line pick rc=0
+  local -a paths=()
+  rows="$(_gwtmux_list "${1:-${GWTMUX_ROOT:-.}}" 1)" || return 1
+  picked="$(printf '%s\n' "$rows" | fzf --multi --layout=reverse \
+    --delimiter=$'\t' --with-nth=2 --tiebreak=index \
+    --preview='[ -n {1} ] && git -C {1} status -sb && git -C {1} log --oneline --color=always -100' \
+    --preview-window=right,50%)" || rc=$?
+  # 1 = no match, 130 = Esc/Ctrl-C: nothing picked is not an error
+  [[ $rc -eq 1 || $rc -eq 130 ]] && return 0
+  [[ $rc -ne 0 ]] && return $rc
+
+  # Not "IFS=tab read": a whitespace IFS strips the leading tab of a bare
+  # header's empty path and reads the tree text as the path.
+  # "pick", not "path": in zsh a local "path" empties the array tied to $PATH.
+  while IFS= read -r line; do
+    pick="${line%%$'\t'*}"
+    [[ -n "$pick" ]] && paths+=("$pick")
+  done <<<"$picked"
+  [[ ${#paths[@]} -eq 0 ]] && return 0
+  gwtmux "${paths[@]}"
+}
+
 # create a git worktree from branch or pr number in new tmux window
 # with -d flag: clean up git worktree (delete worktree/branches, kill/rename tmux window)
 # with --rename flag: rename worktree dir, branch, remote tracking branch, and tmux window
@@ -487,12 +880,15 @@ USAGE:
   gwtmux [<branch_or_pr>...]       Create worktree(s) and open in tmux window(s)
   gwtmux -d [flags] [worktree...]  Clean up worktree(s), branches, and tmux windows
   gwtmux --rename <new_name>       Rename current worktree, branch, and tmux window
+  gwtmux -l, --list [root]         List worktrees from root (default: cwd) down
+  gwtmux -f [root]                 Pick worktree(s) with fzf and open them
   gwtmux -h, --help                Show this help message
 
 NORMAL MODE:
   gwtmux <branch>          Create worktree for branch, open in new tmux window
   gwtmux <pr_number>       Create worktree for PR's branch (uses gh cli)
   gwtmux <path>            Open existing worktree root in new tmux window
+  gwtmux ./<new_dir>       Create worktree at that path, branch = its basename
   gwtmux <repo>/<branch>   Create branch in repo at <repo>/default
   gwtmux branch1 branch2   Create multiple worktrees at once
   gwtmux                   Open windows for all existing worktrees
@@ -501,18 +897,23 @@ NORMAL MODE:
   If window already exists for the branch, it will be selected instead.
   Branch names with slashes are converted to underscores for directory names.
   A path argument must be the root of a worktree; a subdirectory is an error.
+  A path that does not exist, in a directory that does, creates a worktree at
+  that path in the repo that holds the directory (flat repos too). A repo
+  parent (a directory that holds default/) instead reads the rest of the path
+  as a branch name: <repo>/<branch>.
   An argument counts as a path only when it is path-shaped ("/...", "./...",
   "../...", "." or "..") or when it is a worktree root, so a branch name that
   contains a slash is still a branch name.
 
 FLAT REPOS:
   A repo whose root directory does not have the name "default" is a flat repo:
-  a plain clone with no <parent>/default layout. gwtmux only opens windows
-  there - it creates no worktrees and it does not fetch.
+  a plain clone with no <parent>/default layout. gwtmux creates worktrees
+  there only at an explicit new path; a bare branch or PR name is an error.
 
                             convention              flat
   gwtmux <branch> | <pr>    yes                     error
   gwtmux <path>             yes                     yes, opens window
+  gwtmux ./<new_dir>        yes                     yes
   gwtmux (no args)          from parent dir         from inside repo
   -d                        yes                     yes
   -dw on repo root          error                   error
@@ -563,6 +964,23 @@ RENAME MODE (--rename):
   branch that tracks a differently named shared branch (say, one created with
   "git checkout -b feat origin/develop") therefore keeps that branch.
 
+LIST MODE (-l, --list):
+  gwtmux -l [root]         Tree of every repo found from root down (plus the
+                           repo root is inside of), grouped by repo, with each
+                           worktree nested under the worktree that holds it.
+                           Paths are relative to cwd when root is cwd or below
+                           it, else absolute (~ for $HOME). Pass any of them to
+                           gwtmux <path>. Worktrees outside root show as ../ paths.
+  Markers: * = window open in this tmux session, (missing) = dir deleted,
+  (bare) = bare repo. Skips node_modules/ and submodules. Works outside tmux.
+
+PICK MODE (-f):
+  gwtmux -f [root]         Show the -l tree in fzf (--multi), open the picked
+                           worktrees. root defaults to $GWTMUX_ROOT, then cwd.
+                           Missing worktrees are left out. Requires fzf.
+  In a tmux popup:
+    bind-key g display-popup -E -w 80% -h 60% "zsh -ic 'gwtmux -f'"
+
 EXAMPLES:
   gwtmux feature/auth      Create worktree for feature/auth branch
   gwtmux 123               Create worktree for PR #123
@@ -573,6 +991,8 @@ EXAMPLES:
 REQUIREMENTS:
   - git, tmux (required)
   - gh (optional, for PR number support)
+  - fd (optional, makes -l faster on large trees)
+  - fzf (optional, for -f)
   - Must be run inside tmux session
   - Submodules are not supported: the repo gwtmux resolves inside one is the
     superproject. -d refuses to run there; the refusal does not reach a
@@ -594,7 +1014,23 @@ EOF
 
   # Detect mode based on flags
   local mode="normal"
-  if [[ "$1" == "--rename" ]]; then
+  if [[ "$1" == "-l" || "$1" == "--list" ]]; then
+    shift
+    if [[ $# -gt 1 ]]; then
+      echo >&2 "Error: -l takes at most one root path"
+      return 1
+    fi
+    _gwtmux_list "$@"
+    return
+  elif [[ "$1" == "-f" ]]; then
+    shift
+    if [[ $# -gt 1 ]]; then
+      echo >&2 "Error: -f takes at most one root path"
+      return 1
+    fi
+    _gwtmux_pick "$@"
+    return
+  elif [[ "$1" == "--rename" ]]; then
     mode="rename"
     shift
   elif [[ "$1" == -* ]] && [[ "$1" =~ d ]]; then
@@ -1227,7 +1663,10 @@ EOF
     local pane_count="$(_gwtmux_display '#{window_panes}')"
     local shell_name=$(basename "${SHELL:-zsh}")
     local can_reuse_window=0
-    if [[ "$current_window" == "$shell_name" && "$pane_count" == "1" ]]; then
+    # Only from a real pane. In a display-popup (gwtmux -f bound to a key)
+    # TMUX_PANE is unset and tmux reports the window behind the popup: reusing
+    # it would rename that window while only the popup's shell does the cd.
+    if [[ -n "${TMUX_PANE:-}" && "$current_window" == "$shell_name" && "$pane_count" == "1" ]]; then
       can_reuse_window=1
     fi
 
@@ -1382,7 +1821,7 @@ EOF
     local success_count=0
 
     # Declare loop variables outside the loop to avoid re-declaration issues
-    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched pr_branch arg_parent arg_basename resolved_parent repo_parent_candidate candidate_common_dir path_matched arg_is_path_shaped arg_worktree_root resolved_path existing_window_id
+    local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched new_path_matched pr_branch arg_parent arg_basename resolved_parent repo_parent_candidate candidate_common_dir path_matched arg_is_path_shaped arg_worktree_root resolved_path existing_window_id
 
     # Save original directory for resolving relative args after cd
     local orig_pwd="$PWD"
@@ -1398,6 +1837,7 @@ EOF
       default_branch="$orig_default_branch"
       has_git_root="$orig_has_git_root"
       repo_path_matched=0
+      new_path_matched=0
 
       # Check if argument is a path to an existing worktree (can be any repo).
       # An arg only counts as a path when it is explicitly path-shaped ("/...",
@@ -1432,11 +1872,36 @@ EOF
         return 1
       fi
 
+      # A path-shaped arg that does not exist yet, in a directory that does:
+      # create a worktree at exactly that path, on a branch named after its
+      # basename, in whatever repo holds that directory. Works in flat repos
+      # too - the user named the location, so there is nothing to guess. A
+      # repo parent (holds default/) is left to the walk below, which reads
+      # the tail as a branch name in that repo.
+      if [[ $path_matched -eq 0 && $arg_is_path_shaped -eq 1 && ! -e "$arg" ]]; then
+        resolved_parent="$(cd "$(dirname -- "$arg")" 2>/dev/null && pwd -P)"
+        if [[ -n "$resolved_parent" ]] && ! _gwtmux_is_repo_root "$resolved_parent/default"; then
+          if ! candidate_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$resolved_parent")"; then
+            echo >&2 "Error: '$arg' is not inside a git repo"
+            return 1
+          fi
+          _gwtmux_refuse_submodule "$resolved_parent" || return 1
+          git_root="$(dirname -- "$candidate_common_dir")"
+          has_git_root=1
+          $git_cmd -C "$git_root" fetch -a 2>/dev/null || true
+          default_branch="$(_gwtmux_default_branch "$git_root")"
+          branch="$(basename -- "$arg")"
+          worktree_path="$resolved_parent/$branch"
+          worktree_exists=0
+          new_path_matched=1
+        fi
+      fi
+
       # If not an existing path, check if a leading path prefix is a repo parent
       # (contains default/.git). Walk up from the immediate parent so the branch
       # name may itself contain slashes, e.g. <repo>/demo/test-branch creates
       # branch "demo/test-branch". The deepest matching ancestor wins.
-      if [[ $path_matched -eq 0 && ( "$arg" == /* || "$arg" == .* || "$arg" == */* ) ]]; then
+      if [[ $path_matched -eq 0 && $new_path_matched -eq 0 && ( "$arg" == /* || "$arg" == .* || "$arg" == */* ) ]]; then
         arg_parent="$(dirname -- "$arg")"
         arg_basename="$(basename -- "$arg")"
         resolved_parent=""
@@ -1498,13 +1963,13 @@ EOF
       # to create anything. Fail here: the branch handling below would otherwise
       # fold the whole path into a branch name and create that branch, plus a
       # worktree for it, in whatever repo the current directory belongs to.
-      if [[ $path_matched -eq 0 && $repo_path_matched -eq 0 && $arg_is_path_shaped -eq 1 ]]; then
+      if [[ $path_matched -eq 0 && $repo_path_matched -eq 0 && $new_path_matched -eq 0 && $arg_is_path_shaped -eq 1 ]]; then
         echo >&2 "Error: '$arg' is not a worktree root"
         return 1
       fi
 
       # If not a path, resolve branch name (try gh pr first, fall back to arg)
-      if [[ $path_matched -eq 0 && $repo_path_matched -eq 0 ]]; then
+      if [[ $path_matched -eq 0 && $repo_path_matched -eq 0 && $new_path_matched -eq 0 ]]; then
         if [[ $has_git_root -eq 0 ]]; then
           echo >&2 "Error: not in a git repo or parent of default/.git"
           return 1
@@ -1522,7 +1987,7 @@ EOF
       fi
 
       # Only compute worktree path if we didn't already match a path
-      if [[ $path_matched -eq 0 ]]; then
+      if [[ $path_matched -eq 0 && $new_path_matched -eq 0 ]]; then
         dir_branch="${branch//\//_}"
         worktree_path="$(dirname -- "$git_root")/$dir_branch"
         worktree_exists=0

@@ -223,6 +223,34 @@ stub_gh_pr_multi() {
   chmod +x "$STUB_DIR/gh"
 }
 
+# Print $PATH with every dir that holds one of the named commands swapped for
+# a symlinked copy without them. Dropping such a dir outright can drop git
+# too (/usr/bin), so the rest of the dir has to stay reachable.
+# Usage: PATH="$(path_without fd fdfind)" run ...
+path_without() {
+  local dir name shadow hit n=0 out=""
+  local -a path_dirs
+  IFS=: read -ra path_dirs <<<"$PATH"
+  for dir in "${path_dirs[@]}"; do
+    hit=0
+    for name in "$@"; do
+      [[ -e "$dir/$name" ]] && hit=1
+    done
+    if [[ $hit -eq 1 ]]; then
+      n=$((n + 1))
+      shadow="$TEST_TEMP_DIR/path-without/$n"
+      mkdir -p "$shadow"
+      ln -s "$dir"/* "$shadow"/ 2>/dev/null
+      for name in "$@"; do
+        rm -f "$shadow/$name"
+      done
+      dir="$shadow"
+    fi
+    out+="${out:+:}$dir"
+  done
+  printf '%s\n' "$out"
+}
+
 # Get tmux windows for test session
 get_tmux_windows() {
   tmux list-windows -t "$TEST_SESSION" -F "#W" 2>/dev/null || true
@@ -804,18 +832,19 @@ myrepo/existing"
   assert_equal "$(get_window_count)" "$before_count"
 }
 
-@test "gwtmux: errors on a relative path that does not exist" {
+@test "gwtmux: errors on a relative path whose parent does not exist" {
   setup_worktree_structure "myrepo"
 
   local before_list="$(git -C "$MAIN_REPO" worktree list --porcelain)"
   local before_count="$(get_window_count)"
 
-  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux ./nope 2>$TEST_TEMP_DIR/err"
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux ./nodir/nope 2>$TEST_TEMP_DIR/err"
   wait_cmd_done
 
   assert_not_equal "$(cat "$CMD_MARKER")" "0"
   run cat "$TEST_TEMP_DIR/err"
-  assert_output --partial "Error: './nope' is not a worktree root"
+  assert_output --partial "Error: './nodir/nope' is not a worktree root"
+  refute [ -d "$MAIN_REPO/nodir" ]
   run tmux capture-pane -t "$CMD_TARGET" -p
   refute_output --partial "Create new branch"
 
@@ -3838,39 +3867,108 @@ EOF
   refute [ -f "$TEST_TEMP_DIR/gh_was_called" ]
 }
 
-@test "gwtmux: errors on a branch argument under a flat repo path" {
+@test "gwtmux: creates worktree at a nonexistent path in a flat repo from another repo" {
   setup_worktree_structure "myrepo"
   setup_flat_repo "j2"
-  cd "$MAIN_REPO"
 
-  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux $FLAT_REPO/feature-x >$TEST_TEMP_DIR/out 2>&1"
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux $FLAT_REPO/feature-x"
+  confirm_branch_creation "$CMD_TARGET"
+  wait_for_window_exists "j2/feature-x"
   wait_cmd_done
-  assert_equal "$(cat "$CMD_MARKER")" "1"
 
-  run cat "$TEST_TEMP_DIR/out"
-  assert_output --partial "'$FLAT_REPO' is a flat repo"
-  assert_output --partial "cannot create worktree 'feature-x'"
-
-  # No branch named after a filesystem path in the repo we happened to stand in
+  # Created in the repo that holds the path, not the one we stood in
+  run git -C "$FLAT_REPO/feature-x" branch --show-current
+  assert_output "feature-x"
   run git -C "$MAIN_REPO" branch
   refute_output --partial "feature-x"
-  refute [ -d "$FLAT_REPO/feature-x" ]
 }
 
-@test "gwtmux: errors on a branch argument under a flat repo subdirectory path" {
+@test "gwtmux: creates worktree at a nonexistent path under a flat repo subdirectory" {
   setup_worktree_structure "myrepo"
   setup_flat_repo "j2"
   mkdir -p "$FLAT_REPO/src"
-  cd "$MAIN_REPO"
 
-  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux $FLAT_REPO/src/feature-x >$TEST_TEMP_DIR/out 2>&1"
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux $FLAT_REPO/src/feature-x"
+  confirm_branch_creation "$CMD_TARGET"
+  wait_for_window_exists "j2/feature-x"
+  wait_cmd_done
+
+  # Branch is the basename only, never the path folded into a name
+  run git -C "$FLAT_REPO/src/feature-x" branch --show-current
+  assert_output "feature-x"
+}
+
+@test "gwtmux: errors on a branch argument under a missing flat repo subdirectory" {
+  setup_worktree_structure "myrepo"
+  setup_flat_repo "j2"
+
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux $FLAT_REPO/nodir/feature-x >$TEST_TEMP_DIR/out 2>&1"
   wait_cmd_done
   assert_equal "$(cat "$CMD_MARKER")" "1"
 
   run cat "$TEST_TEMP_DIR/out"
   assert_output --partial "'$FLAT_REPO' is a flat repo"
-  # The walk folds the prefix into the branch name, as it does for a repo parent
-  assert_output --partial "cannot create worktree 'src/feature-x'"
+  assert_output --partial "cannot create worktree 'nodir/feature-x'"
+  refute [ -d "$FLAT_REPO/nodir" ]
+}
+
+# ----------------------------------------------------------------------------
+# Path-shaped args that do not exist: create a worktree at that exact path
+# ----------------------------------------------------------------------------
+
+@test "gwtmux: creates worktree at a nonexistent relative path inside a flat repo" {
+  setup_flat_repo "j2"
+  mkdir -p "$FLAT_REPO/tmp"
+
+  send_cmd "$TEST_SESSION" "cd $FLAT_REPO/tmp && gwtmux ./test"
+  confirm_branch_creation "$CMD_TARGET"
+  wait_for_window_exists "j2/test"
+  wait_cmd_done
+
+  run git -C "$FLAT_REPO/tmp/test" branch --show-current
+  assert_output "test"
+  run git -C "$FLAT_REPO" worktree list --porcelain
+  assert_output --partial "worktree $FLAT_REPO/tmp/test"
+}
+
+@test "gwtmux: creates nested worktree at a nonexistent path inside a convention repo" {
+  setup_worktree_structure "myrepo"
+
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux ./nope"
+  confirm_branch_creation "$CMD_TARGET"
+  wait_for_window_exists "myrepo/nope"
+  wait_cmd_done
+
+  run git -C "$MAIN_REPO/nope" branch --show-current
+  assert_output "nope"
+  refute [ -d "$WORKTREE_PARENT/nope" ]
+}
+
+@test "gwtmux: nonexistent path checks out an existing local branch without prompting" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" branch existing main
+  mkdir -p "$FLAT_REPO/tmp"
+
+  send_cmd "$TEST_SESSION" "cd $FLAT_REPO/tmp && gwtmux ./existing"
+  wait_for_window_exists "j2/existing"
+  wait_cmd_done
+
+  run tmux capture-pane -t "$CMD_TARGET" -p
+  refute_output --partial "Create new branch"
+  run git -C "$FLAT_REPO/tmp/existing" branch --show-current
+  assert_output "existing"
+}
+
+@test "gwtmux: errors on a nonexistent path whose parent is outside any git repo" {
+  mkdir -p "$TEST_TEMP_DIR/plain"
+
+  send_cmd "$TEST_SESSION" "cd $TEST_TEMP_DIR/plain && gwtmux ./x 2>$TEST_TEMP_DIR/err"
+  wait_cmd_done
+
+  assert_not_equal "$(cat "$CMD_MARKER")" "0"
+  run cat "$TEST_TEMP_DIR/err"
+  assert_output --partial "Error: './x' is not inside a git repo"
+  refute [ -d "$TEST_TEMP_DIR/plain/x" ]
 }
 
 @test "gwtmux: no args opens a flat repo and its worktrees" {
@@ -4505,3 +4603,328 @@ setup_submodule() {
   refute_output --partial "feature-x"
 }
 
+
+# ============================================================================
+# TESTS: gwtmux -l
+# ============================================================================
+
+@test "gwtmux -l: lists a flat repo and its worktree as a tree" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" worktree add "$FLAT_PARENT/j2-work" -b work main >/dev/null 2>&1
+  cd "$FLAT_PARENT"
+
+  run gwtmux -l
+  assert_success
+  assert_output "$(cat <<'OUT'
+j2            main
+└── j2-work   work
+OUT
+)"
+}
+
+@test "gwtmux -l: nests worktrees under the worktree that contains them, outside ones as ../" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  git -C "$MAIN_REPO" worktree add -b sub "$WORKTREE_PARENT/feat/sub" main >/dev/null 2>&1
+  git -C "$MAIN_REPO" worktree add -b away "$TEST_TEMP_DIR/elsewhere/away" main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT"
+
+  run gwtmux -l
+  assert_success
+  assert_output "$(cat <<'OUT'
+default                 main
+├── ../elsewhere/away   away
+└── feat                feat
+    └── feat/sub        sub
+OUT
+)"
+}
+
+@test "gwtmux -l: root below cwd keeps paths relative to cwd, repos sorted" {
+  setup_worktree_structure "myrepo"
+  setup_flat_repo "j2"
+  cd "$TEST_TEMP_DIR"
+
+  run gwtmux -l ./myrepo
+  assert_success
+  assert_output "myrepo/default   main"
+
+  run gwtmux -l
+  assert_success
+  assert_output "$(cat <<'OUT'
+flat/j2          main
+myrepo/default   main
+OUT
+)"
+}
+
+@test "gwtmux -l: root outside cwd prints absolute paths with ~ for HOME" {
+  setup_worktree_structure "myrepo"
+  setup_flat_repo "j2"
+  cd "$MAIN_REPO"
+
+  HOME="$TEST_TEMP_DIR" run gwtmux -l "$TEST_TEMP_DIR"
+  assert_success
+  assert_output "$(cat <<'OUT'
+~/flat/j2          main
+~/myrepo/default   main
+OUT
+)"
+}
+
+@test "gwtmux -l: includes the repo the root is inside of" {
+  setup_flat_repo "j2"
+  mkdir -p "$FLAT_REPO/src/deep"
+  cd "$FLAT_REPO/src/deep"
+
+  run gwtmux -l
+  assert_success
+  assert_output "../..   main"
+}
+
+@test "gwtmux -l: marks detached, missing, and open-window worktrees" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  git -C "$MAIN_REPO" worktree add --detach "$WORKTREE_PARENT/det" main >/dev/null 2>&1
+  git -C "$MAIN_REPO" worktree add -b gone "$WORKTREE_PARENT/gone" main >/dev/null 2>&1
+  rm -rf "$WORKTREE_PARENT/gone"
+  tmux new-window -d -t "$TEST_SESSION" -n "myrepo/feat"
+  local sha="$(git -C "$MAIN_REPO" rev-parse --short=7 main)"
+  cd "$WORKTREE_PARENT"
+
+  run gwtmux -l
+  assert_success
+  assert_output "$(cat <<OUT
+default    main
+├── det    (detached $sha)
+├── feat   feat                *
+└── gone   gone                (missing)
+OUT
+)"
+}
+
+@test "gwtmux -l: omits the open-window marker outside tmux" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  tmux new-window -d -t "$TEST_SESSION" -n "myrepo/feat"
+  cd "$WORKTREE_PARENT"
+
+  TMUX= run gwtmux -l
+  assert_success
+  refute_output --partial "*"
+}
+
+@test "gwtmux -l: skips submodules" {
+  setup_flat_repo "j2"
+  setup_flat_repo "lib"
+  git -C "$FLAT_PARENT/j2" -c protocol.file.allow=always \
+    submodule add "$FLAT_REMOTE" vendor/lib >/dev/null 2>&1
+  assert [ -e "$FLAT_PARENT/j2/vendor/lib/.git" ]
+  cd "$FLAT_PARENT/j2"
+
+  run gwtmux -l .
+  assert_success
+  assert_output "$(cat <<'OUT'
+.   main
+OUT
+)"
+}
+
+@test "gwtmux -l: errors when no worktrees are found" {
+  mkdir -p "$TEST_TEMP_DIR/empty"
+  cd "$TEST_TEMP_DIR/empty"
+
+  run gwtmux -l
+  assert_failure
+  assert_output --partial "No worktrees found under $TEST_TEMP_DIR/empty"
+}
+
+@test "gwtmux -l: errors on more than one root" {
+  run gwtmux --list a b
+  assert_failure
+  assert_output --partial "at most one root"
+}
+
+@test "gwtmux -l: falls back to find when fd is not installed" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  git -C "$MAIN_REPO" worktree add -b sub "$WORKTREE_PARENT/feat/sub" main >/dev/null 2>&1
+  cd "$WORKTREE_PARENT"
+
+  local no_fd_path="$(path_without fd fdfind)"
+  PATH="$no_fd_path" run command -v fd fdfind
+  assert_output ""
+
+  PATH="$no_fd_path" run gwtmux -l
+  assert_success
+  assert_output "$(cat <<'OUT'
+default            main
+└── feat           feat
+    └── feat/sub   sub
+OUT
+)"
+}
+
+# ============================================================================
+# TESTS: gwtmux -f
+# ============================================================================
+
+# Fake fzf: records its args and stdin, then prints the input lines whose first
+# (tab-separated) field ends with one of the space-separated suffixes in
+# $TEST_TEMP_DIR/fzf_pick. Exits 130 (Esc) when that file is empty.
+stub_fzf() {
+  cat >"$STUB_DIR/fzf" <<EOF2
+#!/bin/bash
+printf '%s\n' "\$@" >"$TEST_TEMP_DIR/fzf_args"
+input="\$(cat)"
+printf '%s\n' "\$input" >"$TEST_TEMP_DIR/fzf_input"
+picks="\$(cat "$TEST_TEMP_DIR/fzf_pick" 2>/dev/null)"
+[[ -z "\$picks" ]] && exit 130
+while IFS= read -r line; do
+  path="\${line%%\$'\t'*}"
+  for p in \$picks; do
+    [[ -n "\$path" && "\$path" == *"\$p" ]] && printf '%s\n' "\$line"
+  done
+done <<<"\$input"
+EOF2
+  chmod +x "$STUB_DIR/fzf"
+}
+
+@test "gwtmux -f: opens the worktree picked in fzf" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  stub_fzf
+  echo "/feat" >"$TEST_TEMP_DIR/fzf_pick"
+
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux -f"
+  wait_for_window_exists "myrepo/feat"
+  wait_cmd_done
+
+  assert tmux_window_exists "myrepo/feat"
+}
+
+@test "gwtmux -f: opens every worktree picked with --multi" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  git -C "$MAIN_REPO" worktree add -b fix "$WORKTREE_PARENT/fix" main >/dev/null 2>&1
+  stub_fzf
+  echo "/feat /fix" >"$TEST_TEMP_DIR/fzf_pick"
+
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux -f"
+  wait_for_window_exists "myrepo/fix"
+  wait_cmd_done
+
+  assert tmux_window_exists "myrepo/feat"
+  assert tmux_window_exists "myrepo/fix"
+  run cat "$TEST_TEMP_DIR/fzf_args"
+  assert_line "--multi"
+}
+
+@test "gwtmux -f: Esc opens nothing and succeeds" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  stub_fzf
+  : >"$TEST_TEMP_DIR/fzf_pick"
+  local before_count="$(get_window_count)"
+
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux -f"
+  wait_cmd_done
+
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux -f: errors when fzf is not installed" {
+  setup_worktree_structure "myrepo"
+  cd "$WORKTREE_PARENT"
+  local no_fzf_path="$(path_without fzf)"
+
+  PATH="$no_fzf_path" run gwtmux -f
+  assert_failure
+  assert_output --partial "gwtmux -f requires fzf"
+}
+
+@test "gwtmux -f: shows the tree, hides missing worktrees, uses GWTMUX_ROOT" {
+  setup_worktree_structure "myrepo"
+  setup_flat_repo "j2"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  git -C "$MAIN_REPO" worktree add -b gone "$WORKTREE_PARENT/gone" main >/dev/null 2>&1
+  rm -rf "$WORKTREE_PARENT/gone"
+  stub_fzf
+  : >"$TEST_TEMP_DIR/fzf_pick"
+  mkdir -p "$TEST_TEMP_DIR/elsewhere"
+  cd "$TEST_TEMP_DIR/elsewhere"
+
+  GWTMUX_ROOT="$WORKTREE_PARENT" run gwtmux -f
+  assert_success
+
+  # Root is beside cwd, so the shown paths are absolute; the hidden first
+  # column is always absolute. j2 is outside GWTMUX_ROOT, so not listed.
+  run cat "$TEST_TEMP_DIR/fzf_input"
+  assert_output "$(printf '%s\t%s\n' \
+    "$MAIN_REPO" "$MAIN_REPO    main" \
+    "$WORKTREE_PARENT/feat" "└── $WORKTREE_PARENT/feat   feat")"
+}
+
+@test "gwtmux: never reuses the shell window when not run from a pane (display-popup)" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  local shell_window="$(tmux display-message -p -t "$TEST_SESSION" '#{window_id}')"
+  tmux rename-window -t "$shell_window" "$(basename "${SHELL:-zsh}")"
+  local before_count="$(get_window_count)"
+
+  send_cmd "$TEST_SESSION" "unset TMUX_PANE; cd $WORKTREE_PARENT && gwtmux ./feat"
+  wait_for_window_exists "myrepo/feat"
+  wait_cmd_done
+
+  # A new window, and the shell window keeps its name
+  assert_equal "$(get_window_count)" "$((before_count + 1))"
+  assert_equal "$(tmux display-message -p -t "$shell_window" '#W')" "$(basename "${SHELL:-zsh}")"
+}
+
+# The suite drives bash, but gwtmux is sourced into zsh too, where some names
+# are special: "local path" empties the array tied to $PATH, and everything
+# called after it loses every command.
+@test "gwtmux -f and -l: work when sourced in zsh" {
+  command -v zsh >/dev/null 2>&1 || skip "zsh is not installed"
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  stub_fzf
+  : >"$TEST_TEMP_DIR/fzf_pick"
+
+  run zsh -fc "source '${BATS_TEST_DIRNAME}/../gwtmux.sh'; cd '$WORKTREE_PARENT' && gwtmux -l && gwtmux -f"
+  assert_success
+  assert_output "$(cat <<'OUT'
+default    main
+└── feat   feat
+OUT
+)"
+  run cat "$TEST_TEMP_DIR/fzf_input"
+  assert_output --partial "└── feat   feat"
+}
+
+@test "gwtmux -l: ignores a .git dir that is not a repo" {
+  setup_flat_repo "j2"
+  mkdir -p "$FLAT_PARENT/fake/.git"
+  echo "ref: refs/heads/main" >"$FLAT_PARENT/fake/.git/HEAD"
+  cd "$FLAT_PARENT"
+
+  run gwtmux -l
+  assert_success
+  assert_output "j2   main"
+}
+
+@test "gwtmux -l: lists worktrees linked with relative paths" {
+  git worktree add -h 2>&1 | grep -q -- '--relative-paths' || skip "git has no --relative-paths"
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" worktree add --relative-paths -b rel "$FLAT_PARENT/j2-rel" main >/dev/null 2>&1
+  cd "$FLAT_PARENT"
+
+  run gwtmux -l
+  assert_success
+  assert_output "$(cat <<'OUT'
+j2           main
+└── j2-rel   rel
+OUT
+)"
+}
