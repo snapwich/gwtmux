@@ -4844,7 +4844,7 @@ EOF2
   assert_output --partial "gwtmux -f requires fzf"
 }
 
-@test "gwtmux -f: shows the tree, hides missing worktrees, uses GWTMUX_ROOT" {
+@test "gwtmux -f: shows flat rows, hides missing worktrees, uses GWTMUX_ROOT" {
   setup_worktree_structure "myrepo"
   setup_flat_repo "j2"
   git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
@@ -4855,15 +4855,43 @@ EOF2
   mkdir -p "$TEST_TEMP_DIR/elsewhere"
   cd "$TEST_TEMP_DIR/elsewhere"
 
-  GWTMUX_ROOT="$WORKTREE_PARENT" run gwtmux -f
+  NO_COLOR=1 GWTMUX_ROOT="$WORKTREE_PARENT" run gwtmux -f
   assert_success
 
   # Root is beside cwd, so the shown paths are absolute; the hidden first
   # column is always absolute. j2 is outside GWTMUX_ROOT, so not listed.
+  # No tree glyphs: fzf hides rows, and a glyph would then point at the
+  # wrong parent.
   run cat "$TEST_TEMP_DIR/fzf_input"
   assert_output "$(printf '%s\t%s\n' \
-    "$MAIN_REPO" "$MAIN_REPO    main" \
-    "$WORKTREE_PARENT/feat" "└── $WORKTREE_PARENT/feat   feat")"
+    "$MAIN_REPO" "$MAIN_REPO   main" \
+    "$WORKTREE_PARENT/feat" "$WORKTREE_PARENT/feat      feat")"
+}
+
+@test "gwtmux -f: colors each repo, dims the parent dir, bolds the worktree dir" {
+  setup_worktree_structure "myrepo"
+  setup_flat_repo "j2"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  git -C "$MAIN_REPO" worktree add -b spike "$WORKTREE_PARENT/feat/spike" main >/dev/null 2>&1
+  stub_fzf
+  : >"$TEST_TEMP_DIR/fzf_pick"
+  cd "$TEST_TEMP_DIR"
+
+  run gwtmux -f
+  assert_success
+
+  run grep -c -- '^--ansi$' "$TEST_TEMP_DIR/fzf_args"
+  assert_output "1"
+  # Rows sort by path: flat/j2 (first repo) before myrepo
+  local e=$'\e'
+  run cut -f2- "$TEST_TEMP_DIR/fzf_input"
+  assert_output "$(cat <<OUT
+$e[2;36mflat/$e[0;1;36mj2$e[0m             main
+$e[2;33mmyrepo/$e[0;1;33mdefault$e[0m      main
+$e[2;33mmyrepo/$e[0;1;33mfeat$e[0m         feat
+$e[2;33mmyrepo/feat/$e[0;1;33mspike$e[0m   spike
+OUT
+)"
 }
 
 @test "gwtmux: never reuses the shell window when not run from a pane (display-popup)" {
@@ -4900,7 +4928,7 @@ default    main
 OUT
 )"
   run cat "$TEST_TEMP_DIR/fzf_input"
-  assert_output --partial "└── feat   feat"
+  assert_output --partial $'feat\e[0m      feat'
 }
 
 @test "gwtmux -l: ignores a .git dir that is not a repo" {

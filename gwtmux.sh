@@ -760,7 +760,7 @@ _gwtmux_list() {
     home_abs="$(cd "$HOME" 2>/dev/null && pwd -P)"
     [[ "$home_abs" == / ]] && home_abs=""
   fi
-  printf '%s' "$rows" | LC_ALL=C awk -F'\t' -v cwd="$cwd_abs" -v abs="$abs" -v home="$home_abs" -v picker="$picker" '
+  printf '%s' "$rows" | LC_ALL=C awk -F'\t' -v cwd="$cwd_abs" -v abs="$abs" -v home="$home_abs" -v picker="$picker" -v nocolor="$NO_COLOR" '
     function rel(p,    a, b, na, nb, i, j, out) {
       if (abs) {
         if (home != "" && p == home) return "~"
@@ -787,9 +787,11 @@ _gwtmux_list() {
       }
     }
     function walk(id, prefix, last, depth,    kids, n, i) {
-      if (depth == 0) L[++nl] = rel(P[id])
+      # The picker shows no tree: fzf hides rows that do not match, which
+      # would leave a glyph pointing at a row that is not the parent
+      if (depth == 0 || picker) L[++nl] = rel(P[id])
       else L[++nl] = prefix (last ? "└── " : "├── ") rel(P[id])
-      LB[nl] = B[id]; LM[nl] = M[id]; LP[nl] = P[id]
+      LB[nl] = B[id]; LM[nl] = M[id]; LP[nl] = P[id]; LR[nl] = repo
       n = NK[id]
       for (i = 1; i <= n; i++) kids[i] = KID[id, i]
       sortidx(kids, n)
@@ -812,14 +814,26 @@ _gwtmux_list() {
         KID[par, ++NK[par]] = k
       }
       sortidx(roots, nr)
-      for (r = 1; r <= nr; r++) walk(roots[r], "", 1, 0)
+      for (r = 1; r <= nr; r++) { repo = r; walk(roots[r], "", 1, 0) }
       for (i = 1; i <= nl; i++) {
         w = dlen(L[i]); if (w > lw) lw = w
         w = dlen(LB[i]); if (w > bw) bw = w
       }
+      # Picker colors: every row of one repo shares a color, the parent dir
+      # is dim and the worktree dir bold, so a row shows where it belongs
+      # when fzf hides its neighbors. fzf matches on the text, not the codes.
+      ncol = split("36 33 35 32 34", COL, " ")
       for (i = 1; i <= nl; i++) {
-        line = pad(L[i], lw) "   " LB[i]
-        if (LM[i] != "") line = pad(L[i], lw) "   " pad(LB[i], bw) "  " LM[i]
+        shown = L[i]
+        if (picker && nocolor == "") {
+          c = COL[(LR[i] - 1) % ncol + 1]
+          dir = ""; base = L[i]
+          if (match(base, /.*\//)) { dir = substr(base, 1, RLENGTH); base = substr(base, RLENGTH + 1) }
+          shown = (dir != "" ? "\033[2;" c "m" dir : "") "\033[0;1;" c "m" base "\033[0m"
+        }
+        for (w = dlen(L[i]); w < lw; w++) shown = shown " "
+        line = shown "   " LB[i]
+        if (LM[i] != "") line = shown "   " pad(LB[i], bw) "  " LM[i]
         sub(/ +$/, "", line)
         if (!picker) { print line; continue }
         # Picker rows: the path to open, then the line fzf shows. A bare
@@ -842,7 +856,7 @@ _gwtmux_pick() {
   local rows picked line pick rc=0
   local -a paths=()
   rows="$(_gwtmux_list "${1:-${GWTMUX_ROOT:-.}}" 1)" || return 1
-  picked="$(printf '%s\n' "$rows" | fzf --multi --layout=reverse \
+  picked="$(printf '%s\n' "$rows" | fzf --ansi --multi --layout=reverse \
     --delimiter=$'\t' --with-nth=2 --tiebreak=index \
     --preview='[ -n {1} ] && git -C {1} status -sb && git -C {1} log --oneline --color=always -100' \
     --preview-window=right,50%)" || rc=$?

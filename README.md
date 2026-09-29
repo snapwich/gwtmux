@@ -188,7 +188,10 @@ gwtmux -f            # root: $GWTMUX_ROOT, else the current directory
 gwtmux -f ~/repos
 ```
 
-`-f` shows the `-l` tree in fzf. Select one or more worktrees (Tab for
+`-f` shows the `-l` worktrees in fzf as flat rows, not as a tree. When fzf
+hides rows that do not match, a tree would show a worktree below the wrong
+parent. Instead, all rows of one repo have the same color, the parent dir is
+dim and the worktree dir is bold. Set `NO_COLOR` to disable the colors. Select one or more worktrees (Tab for
 multi-select) and gwtmux opens a window for each. Esc cancels. The preview
 shows `git status -sb` and the last 100 commits. Missing worktrees are not
 shown. You can see bare repos, but you cannot select them.
