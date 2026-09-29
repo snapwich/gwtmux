@@ -4868,11 +4868,13 @@ EOF2
     "$WORKTREE_PARENT/feat" "$WORKTREE_PARENT/feat      feat")"
 }
 
-@test "gwtmux -f: colors each repo, dims the parent dir, bolds the worktree dir" {
+@test "gwtmux -f: colors repo groups, not a lone flat repo; dims the parent dir, bolds the worktree dir" {
   setup_worktree_structure "myrepo"
   setup_flat_repo "j2"
+  setup_flat_repo "j3"
   git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
   git -C "$MAIN_REPO" worktree add -b spike "$WORKTREE_PARENT/feat/spike" main >/dev/null 2>&1
+  git -C "$FLAT_REPO" worktree add -b x "$FLAT_PARENT/j3-x" main >/dev/null 2>&1
   stub_fzf
   : >"$TEST_TEMP_DIR/fzf_pick"
   cd "$TEST_TEMP_DIR"
@@ -4882,14 +4884,24 @@ EOF2
 
   run grep -c -- '^--ansi$' "$TEST_TEMP_DIR/fzf_args"
   assert_output "1"
-  # Rows sort by path: flat/j2 (first repo) before myrepo
-  local e=$'\e'
-  run cut -f2- "$TEST_TEMP_DIR/fzf_input"
-  assert_output "$(cat <<OUT
-$e[2;36mflat/$e[0;1;36mj2$e[0m             main
-$e[2;33mmyrepo/$e[0;1;33mdefault$e[0m      main
-$e[2;33mmyrepo/$e[0;1;33mfeat$e[0m         feat
-$e[2;33mmyrepo/feat/$e[0;1;33mspike$e[0m   spike
+
+  # The hash of the temp path picks the colors, so read them from the rows
+  local e=$'\e' rows c3 cm
+  rows="$(cut -f2- "$TEST_TEMP_DIR/fzf_input")"
+  c3="$(printf '%s\n' "$rows" | sed -n 2p | sed -E 's/^\x1b\[2;([0-9]+)m.*/\1/')"
+  cm="$(printf '%s\n' "$rows" | sed -n 4p | sed -E 's/^\x1b\[2;([0-9]+)m.*/\1/')"
+  [[ "$c3" =~ ^3[2-6]$ && "$cm" =~ ^3[2-6]$ ]]
+  # j3 and myrepo are the two colored groups next to each other
+  [[ "$c3" != "$cm" ]]
+
+  # Rows sort by path. j2 is a flat repo alone, so it has no color.
+  assert_equal "$rows" "$(cat <<OUT
+flat/j2             main
+$e[2;${c3}mflat/$e[0;1;${c3}mj3$e[0m             main
+$e[2;${c3}mflat/$e[0;1;${c3}mj3-x$e[0m           x
+$e[2;${cm}mmyrepo/$e[0;1;${cm}mdefault$e[0m      main
+$e[2;${cm}mmyrepo/$e[0;1;${cm}mfeat$e[0m         feat
+$e[2;${cm}mmyrepo/feat/$e[0;1;${cm}mspike$e[0m   spike
 OUT
 )"
 }

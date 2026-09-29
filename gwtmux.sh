@@ -799,7 +799,7 @@ _gwtmux_list() {
         walk(kids[i], depth == 0 ? "" : prefix (last ? "    " : "│   "), i == n, depth + 1)
     }
     {
-      N++; C[N] = $1; P[N] = $2; B[N] = $3; M[N] = $4
+      N++; C[N] = $1; P[N] = $2; B[N] = $3; M[N] = $4; NW[$1]++
       AT[$1, $2] = N
       if ($5 == 1) { MAIN[$1] = N; roots[++nr] = N }
     }
@@ -814,19 +814,35 @@ _gwtmux_list() {
         KID[par, ++NK[par]] = k
       }
       sortidx(roots, nr)
+      # Picker colors group the rows of a convention repo, or of a flat repo
+      # with more than one worktree; a flat repo alone gets none. A hash of
+      # the repo path picks the color, so a repo keeps it from any root. A
+      # repo that hashes to the color of the colored repo above it takes the
+      # next color, so two groups next to each other never look like one.
+      ncol = split("36 33 35 32 34", COL, " ")
+      for (i = 1; i < 256; i++) ORD[sprintf("%c", i)] = i
+      prev = 0
+      for (r = 1; r <= nr; r++) {
+        cr = C[roots[r]]; RC[r] = ""
+        if (P[roots[r]] !~ /\/default$/ && NW[cr] < 2) continue
+        h = 0
+        for (i = 1; i <= length(cr); i++) h = (h * 31 + ORD[substr(cr, i, 1)]) % 1000003
+        h = h % ncol + 1
+        if (h == prev) h = h % ncol + 1
+        RC[r] = COL[h]; prev = h
+      }
       for (r = 1; r <= nr; r++) { repo = r; walk(roots[r], "", 1, 0) }
       for (i = 1; i <= nl; i++) {
         w = dlen(L[i]); if (w > lw) lw = w
         w = dlen(LB[i]); if (w > bw) bw = w
       }
-      # Picker colors: every row of one repo shares a color, the parent dir
-      # is dim and the worktree dir bold, so a row shows where it belongs
-      # when fzf hides its neighbors. fzf matches on the text, not the codes.
-      ncol = split("36 33 35 32 34", COL, " ")
+      # In a colored row the parent dir is dim and the worktree dir bold, so
+      # a row shows where it belongs when fzf hides its neighbors. fzf
+      # matches on the text, not the codes.
       for (i = 1; i <= nl; i++) {
         shown = L[i]
-        if (picker && nocolor == "") {
-          c = COL[(LR[i] - 1) % ncol + 1]
+        if (picker && nocolor == "" && RC[LR[i]] != "") {
+          c = RC[LR[i]]
           dir = ""; base = L[i]
           if (match(base, /.*\//)) { dir = substr(base, 1, RLENGTH); base = substr(base, RLENGTH + 1) }
           shown = (dir != "" ? "\033[2;" c "m" dir : "") "\033[0;1;" c "m" base "\033[0m"
