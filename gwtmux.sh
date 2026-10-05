@@ -26,6 +26,23 @@ _gwtmux_window_id_by_name() {
     }'
 }
 
+# Succeed if the invoking window is a throwaway shell window gwtmux may reuse
+# or close: one pane, and a name the user did not choose. "Not chosen" is
+# automatic-rename still on (whatever automatic-rename-format names it, e.g.
+# the cwd) or, for configs with automatic-rename off, the shell's name that
+# tmux gives a new window. A window renamed by hand fails both.
+# Only from a real pane: in a display-popup (gwtmux -f bound to a key)
+# TMUX_PANE is unset and tmux reports the window behind the popup. Reusing it
+# would rename that window while only the popup's shell does the cd.
+_gwtmux_window_reusable() {
+  [[ -n "${TMUX_PANE:-}" ]] || return 1
+  local info
+  info="$(_gwtmux_display '#{window_panes} #{automatic-rename} #W')" || return 1
+  [[ "${info%% *}" == "1" ]] || return 1
+  info="${info#* }"
+  [[ "${info%% *}" == "1" || "${info#* }" == "$(basename "${SHELL:-zsh}")" ]]
+}
+
 # Resolve a git dir query (--git-dir or --git-common-dir) to an absolute,
 # normalized path. Git prints these relative to the working directory when run
 # inside the main repo (".git" at the top, "../../.git" two levels down), so
@@ -1297,6 +1314,9 @@ EOF
           [[ $in_main_repo -eq 0 ]] && cd ..
           local shell_name=$(basename "${SHELL:-zsh}")
           tmux rename-window -t "$gwt_window" "$shell_name"
+          # rename-window turns automatic-rename off for this window. Unset it
+          # so the window follows the global setting and format again.
+          tmux set-window-option -t "$gwt_window" -u automatic-rename
         else
           # Not last window: kill as usual
           tmux kill-window -t "$gwt_window"
@@ -1541,6 +1561,9 @@ EOF
           # Last window: navigate to parent and rename to shell name
           local shell_name=$(basename "${SHELL:-zsh}")
           tmux rename-window -t "$gwt_window" "$shell_name"
+          # rename-window turns automatic-rename off for this window. Unset it
+          # so the window follows the global setting and format again.
+          tmux set-window-option -t "$gwt_window" -u automatic-rename
         else
           # Not last window: kill as usual
           tmux kill-window -t "$gwt_window"
@@ -1688,17 +1711,9 @@ EOF
     fi
 
     # Capture shell window to potentially reuse or kill (before any commands run)
-    local current_window="$(_gwtmux_display '#W')"
     local current_window_id="$gwt_window"
-    local pane_count="$(_gwtmux_display '#{window_panes}')"
-    local shell_name=$(basename "${SHELL:-zsh}")
     local can_reuse_window=0
-    # Only from a real pane. In a display-popup (gwtmux -f bound to a key)
-    # TMUX_PANE is unset and tmux reports the window behind the popup: reusing
-    # it would rename that window while only the popup's shell does the cd.
-    if [[ -n "${TMUX_PANE:-}" && "$current_window" == "$shell_name" && "$pane_count" == "1" ]]; then
-      can_reuse_window=1
-    fi
+    _gwtmux_window_reusable && can_reuse_window=1
 
     if [[ $# -eq 0 ]]; then
       # Convention mode is decided first, on "$PWD/default is a repo ROOT".

@@ -1028,6 +1028,59 @@ myrepo/existing"
   refute_output --partial "$shell_name"
 }
 
+@test "gwtmux: reuses a single-pane window named by automatic-rename-format" {
+  setup_worktree_structure "myrepo"
+
+  # A config that names windows after the cwd, not after the shell
+  tmux set-option -g automatic-rename-format '#{b:pane_current_path}'
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux set-window-option -t "$first_window" automatic-rename on
+  local initial_window_count=$(get_window_count)
+
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux new-branch"
+  confirm_branch_creation "$first_window"
+  wait_for_dir_exists "$WORKTREE_PARENT/new-branch"
+  wait_cmd_done
+
+  assert_equal "$(get_window_count)" "$initial_window_count"
+  assert_equal "$(tmux display-message -p -t "$first_window" '#W')" "myrepo/new-branch"
+}
+
+@test "gwtmux: keeps a window renamed by hand" {
+  setup_worktree_structure "myrepo"
+
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux rename-window -t "$first_window" "notes"
+  local initial_window_count=$(get_window_count)
+
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux new-branch"
+  confirm_branch_creation "$first_window"
+  wait_for_window_exists "myrepo/new-branch"
+  wait_cmd_done
+
+  assert_equal "$(get_window_count)" "$((initial_window_count + 1))"
+  assert_equal "$(tmux display-message -p -t "$first_window" '#W')" "notes"
+}
+
+@test "gwtmux: keeps a multi-pane window named by automatic-rename-format" {
+  setup_worktree_structure "myrepo"
+
+  tmux set-option -g automatic-rename-format '#{b:pane_current_path}'
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux set-window-option -t "$first_window" automatic-rename on
+  tmux split-window -t "$first_window"
+  local first_pane=$(tmux list-panes -t "$first_window" -F "#{pane_id}" | head -1)
+  local initial_window_count=$(get_window_count)
+
+  send_cmd "$first_pane" "cd $MAIN_REPO && gwtmux new-branch"
+  confirm_branch_creation "$first_pane"
+  wait_for_window_exists "myrepo/new-branch"
+  wait_cmd_done
+
+  assert_equal "$(get_window_count)" "$((initial_window_count + 1))"
+  assert_equal "$(tmux list-panes -t "$first_window" | wc -l)" "2"
+}
+
 @test "gwtmux: creates new window if shell window has multiple panes" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
@@ -2511,6 +2564,8 @@ myrepo/existing"
   # Get the actual window ID and expected shell name
   local window_id=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
   local expected_shell=$(basename "${SHELL:-zsh}")
+  # With automatic-rename on, the window would move on to the format's name
+  tmux set-window-option -g automatic-rename off
 
   send_cmd "$window_id" "cd $WORKTREE_PARENT/test-wt && gwtmux -d"
   wait_until "[ \"\$(tmux display-message -t '$window_id' -p '#W')\" = '$expected_shell' ]"
@@ -2523,6 +2578,41 @@ myrepo/existing"
   # Window should be renamed to shell name
   run tmux display-message -t "$window_id" -p '#W'
   assert_output "$expected_shell"
+}
+
+@test "gwtmux -d: last window follows automatic-rename-format again" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add "$WORKTREE_PARENT/test-wt" -b test-branch main >/dev/null 2>&1
+
+  tmux set-option -g automatic-rename-format '#{b:pane_current_path}'
+  tmux set-window-option -g automatic-rename on
+  local window_id=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux rename-window -t "$window_id" "myrepo/test-wt"
+
+  send_cmd "$window_id" "cd $WORKTREE_PARENT/test-wt && gwtmux -d"
+  wait_cmd_done
+
+  # Back in the parent dir, and named after it by the format
+  wait_until "[ \"\$(tmux display-message -t '$window_id' -p '#W')\" = 'myrepo' ]"
+  assert_equal "$(tmux display-message -t "$window_id" -p '#{automatic-rename}')" "1"
+}
+
+@test "gwtmux -d: last window follows automatic-rename-format again after deleting several worktrees" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add "$WORKTREE_PARENT/wt-1" -b wt-1 main >/dev/null 2>&1
+  git -C "$MAIN_REPO" worktree add "$WORKTREE_PARENT/wt-2" -b wt-2 main >/dev/null 2>&1
+
+  tmux set-option -g automatic-rename-format '#{b:pane_current_path}'
+  tmux set-window-option -g automatic-rename on
+  local window_id=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux rename-window -t "$window_id" "myrepo/wt-2"
+
+  send_cmd "$window_id" "cd $WORKTREE_PARENT/wt-2 && gwtmux -dw wt-1 wt-2"
+  wait_for_dir_deleted "$WORKTREE_PARENT/wt-2"
+  wait_cmd_done
+
+  assert_equal "$(get_window_count)" "1"
+  wait_until "[ \"\$(tmux display-message -t '$window_id' -p '#{automatic-rename}')\" = 1 ]"
 }
 
 @test "gwtmux -d: navigates to parent when renaming last window" {
@@ -3706,6 +3796,8 @@ myrepo/existing"
 
   local window_id=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
   local expected_shell=$(basename "${SHELL:-zsh}")
+  # With automatic-rename on, the window would move on to the format's name
+  tmux set-window-option -g automatic-rename off
 
   send_cmd "$window_id" "cd $MAIN_REPO && gwtmux -dB"
   wait_until "[ \"\$(tmux display-message -t '$window_id' -p '#W')\" = '$expected_shell' ]"
@@ -3987,6 +4079,22 @@ EOF
   assert tmux_window_exists "j2/j2-work"
   # The reusable single-pane shell window is killed, as in convention mode
   refute tmux_window_exists "$shell_name"
+}
+
+@test "gwtmux: no args closes a single-pane window named by automatic-rename-format" {
+  setup_flat_repo "j2"
+  git -C "$FLAT_REPO" worktree add "$FLAT_PARENT/j2-work" -b work main >/dev/null 2>&1
+
+  tmux set-option -g automatic-rename-format '#{b:pane_current_path}'
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux set-window-option -t "$first_window" automatic-rename on
+
+  send_cmd "$first_window" "cd $FLAT_REPO && gwtmux"
+  wait_for_window_exists "j2/j2-work"
+  wait_until "! tmux list-windows -a -F '#{window_id}' | grep -Fxq '$first_window'"
+
+  assert tmux_window_exists "j2"
+  assert_equal "$(get_window_count)" "2"
 }
 
 @test "gwtmux: no args works from a subdirectory of a flat repo" {
@@ -4304,6 +4412,8 @@ EOF
 
   local window_id=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
   local expected_shell=$(basename "${SHELL:-zsh}")
+  # With automatic-rename on, the window would move on to the format's name
+  tmux set-window-option -g automatic-rename off
 
   send_cmd "$window_id" "cd $FLAT_REPO && gwtmux -dB"
   wait_until "[ \"\$(tmux display-message -t '$window_id' -p '#W')\" = '$expected_shell' ]"
@@ -4920,6 +5030,22 @@ OUT
   # A new window, and the shell window keeps its name
   assert_equal "$(get_window_count)" "$((before_count + 1))"
   assert_equal "$(tmux display-message -p -t "$shell_window" '#W')" "$(basename "${SHELL:-zsh}")"
+}
+
+@test "gwtmux: never reuses a window named by automatic-rename-format when not run from a pane (display-popup)" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  tmux set-option -g automatic-rename-format '#{b:pane_current_path}'
+  local shell_window="$(tmux display-message -p -t "$TEST_SESSION" '#{window_id}')"
+  tmux set-window-option -t "$shell_window" automatic-rename on
+  local before_count="$(get_window_count)"
+
+  send_cmd "$TEST_SESSION" "unset TMUX_PANE; cd $WORKTREE_PARENT && gwtmux ./feat"
+  wait_for_window_exists "myrepo/feat"
+  wait_cmd_done
+
+  assert_equal "$(get_window_count)" "$((before_count + 1))"
+  assert_equal "$(tmux show-window-options -v -t "$shell_window" automatic-rename)" "on"
 }
 
 # The suite drives bash, but gwtmux is sourced into zsh too, where some names

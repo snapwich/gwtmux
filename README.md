@@ -55,16 +55,26 @@ run gwtmux inside a submodule.
 
 ### Window names
 
-| worktree                        | window name             |
-| ------------------------------- | ----------------------- |
-| convention repo root            | `<parent>/default`      |
-| worktree of a convention repo   | `<parent>/<branch>`     |
-| flat repo root                  | `<repo>`                |
-| worktree of a flat repo         | `<repo>/<dir name>`     |
+| worktree                      | window name         |
+| ----------------------------- | ------------------- |
+| convention repo root          | `<parent>/default`  |
+| worktree of a convention repo | `<parent>/<branch>` |
+| flat repo root                | `<repo>`            |
+| worktree of a flat repo       | `<repo>/<dir name>` |
 
 The window name of a flat repo comes from the directory name, not from the branch. Thus an in-place
 `git switch` does not move the window. Two repos that have the same directory name in different
 locations get the same window name.
+
+### Window reuse
+
+gwtmux reuses or closes the window that you call it from when that window has one pane and a name
+that you did not set. That is, tmux names the window automatically (`automatic-rename` is on, with
+any `automatic-rename-format`), or the window name is the name of your shell. To keep a window,
+rename it (`prefix ,`).
+
+When `gwtmux -d` closes the last window of a session, it does not kill the window. It renames the
+window to the name of your shell and turns `automatic-rename` back to your global setting.
 
 ## Features
 
