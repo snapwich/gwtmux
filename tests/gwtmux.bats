@@ -3449,6 +3449,52 @@ myrepo/existing"
   assert_output --partial "nested"
 }
 
+@test "gwtmux -dwB <name>: refuses while a process runs in the worktree" {
+  [[ -r /proc/self/cwd ]] || skip "needs /proc"
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git worktree add "$WORKTREE_PARENT/busy" -b busy main >/dev/null 2>&1
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/busy" -c "$WORKTREE_PARENT/busy" >/dev/null 2>&1
+
+  # Stands in for a dev server: "git worktree remove" would delete most of the
+  # tree and then fail on the files it still writes.
+  (cd "$WORKTREE_PARENT/busy" && exec sleep 30) &
+  local server=$!
+
+  run gwtmux -dwB busy
+  kill "$server"
+  assert_failure
+  assert_output --partial "processes still run in worktree"
+  assert_output --partial "pid $server: sleep"
+
+  # Nothing touched: worktree, branch and window all still there
+  assert_file_exists "$WORKTREE_PARENT/busy/README.md"
+  run git -C "$MAIN_REPO" worktree list
+  assert_output --partial "busy"
+  run git -C "$MAIN_REPO" branch
+  assert_output --partial "busy"
+  get_tmux_windows | grep -Fxq "myrepo/busy"
+}
+
+@test "gwtmux -dwB: refuses in the current worktree while a process runs there" {
+  [[ -r /proc/self/cwd ]] || skip "needs /proc"
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git worktree add "$WORKTREE_PARENT/busy" -b busy main >/dev/null 2>&1
+
+  (cd "$WORKTREE_PARENT/busy" && exec sleep 30) &
+  local server=$!
+
+  cd "$WORKTREE_PARENT/busy"
+  run gwtmux -dwB
+  kill "$server"
+  assert_failure
+  assert_output --partial "pid $server: sleep"
+  assert_file_exists "$WORKTREE_PARENT/busy/README.md"
+  run git -C "$MAIN_REPO" branch
+  assert_output --partial "busy"
+}
+
 # ----------------------------------------------------------------------------
 # Done mode: worktree name resolution
 # ----------------------------------------------------------------------------

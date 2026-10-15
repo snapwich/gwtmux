@@ -253,6 +253,13 @@ a nested worktree with `--force`: uncommitted work there stops the operation,
 just as it does in the target itself. A target that gwtmux cannot remove keeps
 its branch and its tmux window, and the command exits non-zero.
 
+`-w` refuses to start while a process other than a shell still runs in a
+target, for example a dev server in one of its panes. The error lists each
+process. Stop them and run the command again. Without this check, git deletes
+most of the files and then fails on the files that the server still writes.
+On Linux, gwtmux finds every process whose working directory is in the
+worktree. On other systems, it examines only the panes of the worktree's window.
+
 ### Rename
 
 ```bash
