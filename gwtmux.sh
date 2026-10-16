@@ -368,61 +368,153 @@ _gwtmux_check_clean_tree() {
   return 1
 }
 
-# Refuse to remove a worktree that a process still uses. "git worktree remove"
-# checks only for modified and untracked files - ignored files do not count -
-# so it starts to delete while a dev server still writes its ignored build
-# output. The last rmdir then fails with "Directory not empty", after git has
-# unregistered the worktree and deleted most of it, and gwtmux stops before the
-# branch and window steps: all three are left half torn down. Check first.
-# Shells do not count: the shell that runs gwtmux is often in the worktree, and
-# an idle shell writes nothing. Neither do short-lived processes, such as a
-# prompt's "git status": only a process found by two scans 0.3s apart counts.
-# Args: <worktree_path> [window_id]
+# Refuse to remove a worktree that git would refuse to remove: modified or
+# untracked files, ignored files excluded, the same rule "git worktree remove"
+# applies. gwtmux stops the processes in the worktree's window before the
+# removal, so a refusal from git itself would come too late - the editor and
+# the server would already be gone. Nested worktrees show as untracked, but
+# they are removed before their parent.
+# Args: <worktree_path> [nested_worktree_paths...]
+_gwtmux_check_removable() {
+  local wt_path="$1" line path nwt dirty=0
+  shift
+  while IFS= read -r line; do
+    path="$wt_path/${line:3}"
+    for nwt in "$@"; do
+      [[ "$path" == "$nwt/" || "$path" == "$nwt/"* ]] && continue 2
+    done
+    dirty=1
+    break
+  done < <(git -C "$wt_path" -c core.quotePath=false status --porcelain -uall --ignore-submodules=none 2>/dev/null)
+
+  [[ $dirty -eq 0 ]] && return 0
+  echo >&2 "Error: worktree '$wt_path' contains modified or untracked files. Commit, stash, or discard them before gwtmux -dw."
+  return 1
+}
+
+# Print "<pid> <command>" for each process that runs in the panes of the given
+# windows: the processes that closing those windows ends. The interactive shell
+# of each pane is left out, and so is the whole pane that runs gwtmux.
+# Args: <window_id>...
+_gwtmux_window_processes() {
+  local window_id roots="" pid is_root cmd
+  [[ -n "$TMUX" ]] || return 0
+  for window_id in "$@"; do
+    [[ -n "$window_id" ]] || continue
+    roots+="$(tmux list-panes -t "$window_id" -F '#{pane_id} #{pane_pid}' 2>/dev/null |
+      awk -v own="${TMUX_PANE:-}" '$1 != own { printf " %s", $2 }')"
+  done
+  [[ -n "$roots" ]] || return 0
+
+  # One ps for the whole process table; awk follows it down from each pane's
+  # first process to all of its descendants.
+  ps -A -o pid= -o ppid= -o comm= 2>/dev/null | awk -v roots="$roots" '
+    { pid[NR] = $1; ppid[NR] = $2
+      cmd = $3; for (i = 4; i <= NF; i++) cmd = cmd " " $i
+      sub(/.*\//, "", cmd); name[$1] = cmd }
+    END {
+      n = split(roots, r, " ")
+      for (i = 1; i <= n; i++) { tree[r[i]] = 1; root[r[i]] = 1 }
+      do {
+        added = 0
+        for (i = 1; i <= NR; i++)
+          if (!(pid[i] in tree) && (ppid[i] in tree)) { tree[pid[i]] = 1; added = 1 }
+      } while (added)
+      for (p in tree) if (p in name) print p, (p in root ? 1 : 0), name[p]
+    }' | while IFS=' ' read -r pid is_root cmd; do
+    # Keep a pane's first process only if it is not a shell, such as a window
+    # opened straight into a command.
+    [[ $is_root -eq 1 ]] && _gwtmux_is_shell "$cmd" && continue
+    echo "$pid $cmd"
+  done
+}
+
+# End the processes in the worktree's window before the worktree is removed.
+# Closing the window ends them anyway, but only after the removal, and a file
+# watcher such as a dev server writes new files while git deletes: the last
+# rmdir fails with "Directory not empty" after git has unregistered the
+# worktree and deleted most of it, or the files come back after git is done.
+# SIGHUP first, as a closed window sends, then SIGTERM. A process that outlives
+# both stops the operation, and the worktree is left as it is.
+# Args: <window_id>...
+_gwtmux_stop_window_processes() {
+  local procs pid cmd sig tries
+  local -a pids=() left=()
+  procs="$(_gwtmux_window_processes "$@")"
+  [[ -n "$procs" ]] || return 0
+  while IFS=' ' read -r pid cmd; do
+    pids+=("$pid")
+  done <<<"$procs"
+
+  for sig in HUP TERM; do
+    kill -s "$sig" "${pids[@]}" 2>/dev/null
+    tries=0
+    while :; do
+      # A zombie has exited: only its parent has not reaped it yet.
+      left=($(ps -o pid= -o stat= -p "$(IFS=,; echo "${pids[*]}")" 2>/dev/null |
+        awk '$2 !~ /^Z/ { print $1 }'))
+      [[ ${#left[@]} -eq 0 ]] && return 0
+      [[ $tries -ge 20 ]] && break
+      sleep 0.1
+      tries=$((tries + 1))
+    done
+    pids=("${left[@]}")
+  done
+
+  echo >&2 "Error: processes in the worktree's window did not exit. The worktree was not removed:"
+  while IFS=' ' read -r pid cmd; do
+    [[ " ${pids[*]} " == *" $pid "* ]] && echo >&2 "  pid $pid: $cmd"
+  done <<<"$procs"
+  return 1
+}
+
+# Refuse to remove a worktree that a process outside its window still uses.
+# gwtmux stops the processes in the window first (see above), but nothing
+# stops a server that runs in another window or terminal, and it can leave the
+# worktree half deleted in the same way. Shells do not count: an idle shell
+# writes nothing. Neither do short-lived processes, such as a prompt's
+# "git status": only a process found by two scans 0.3s apart counts.
+# Linux only: other systems have no cheap way to read the cwd of a process.
+# Args: <worktree_path> [window_id...]
 _gwtmux_check_worktree_idle() {
-  local wt_path="$1" window_id="${2:-}" real first second line busy=""
+  local wt_path="$1" real first second line busy=""
+  shift
   real="$(cd "$wt_path" 2>/dev/null && pwd -P)" || return 0
 
-  first="$(_gwtmux_worktree_processes "$real" "$window_id")"
+  first="$(_gwtmux_worktree_processes "$real" "$@")"
   [[ -z "$first" ]] && return 0
   sleep 0.3
-  second="$(_gwtmux_worktree_processes "$real" "$window_id")"
+  second="$(_gwtmux_worktree_processes "$real" "$@")"
   while IFS= read -r line; do
     [[ -n "$line" && $'\n'"$first"$'\n' == *$'\n'"$line"$'\n'* ]] && busy+="$line"$'\n'
   done <<<"$second"
 
   [[ -z "$busy" ]] && return 0
-  echo >&2 "Error: processes still run in worktree '$wt_path'. Stop them before gwtmux -dw:"
+  echo >&2 "Error: processes outside its window still run in worktree '$wt_path'. Stop them before gwtmux -dw:"
   printf >&2 '%s' "$busy"
   return 1
 }
 
-# Print one "  pid <pid>: <command>" line for each process, other than a shell,
-# that uses the worktree.
-# Linux: every process of this user whose cwd is in the worktree, which also
-# finds background jobs and processes in other windows or terminals.
-# Elsewhere: the foreground command of each pane in the worktree's window,
-# as "  pane <index>: <command>".
-# Args: <resolved_worktree_path> [window_id]
+# Print one "  pid <pid>: <command>" line for each process, other than a shell
+# or a process in the given windows, whose cwd is in the worktree.
+# Args: <resolved_worktree_path> [window_id...]
 _gwtmux_worktree_processes() {
-  local real="$1" window_id="${2:-}" proc_dir cwd cmd pane
+  local real="$1" proc_dir cwd cmd in_window
+  shift
+  [[ -r /proc/self/cwd ]] || return 0
+  in_window=" $(_gwtmux_window_processes "$@" | awk '{ printf "%s ", $1 }')"
 
-  if [[ -r /proc/self/cwd ]]; then
-    # One find for all processes, not one readlink each. Run from / so that
-    # find itself is not in the worktree. Processes of other users fail to
-    # resolve and are skipped.
-    while IFS=' ' read -r proc_dir cwd; do
-      [[ "$cwd" == "$real" || "$cwd" == "$real"/* ]] || continue
-      cmd=""
-      read -r cmd 2>/dev/null <"$proc_dir/comm" || continue
-      _gwtmux_is_shell "$cmd" && continue
-      echo "  pid ${proc_dir#/proc/}: $cmd"
-    done < <(cd / && find /proc/[0-9]*/cwd -maxdepth 0 -printf '%h %l\n' 2>/dev/null)
-  elif [[ -n "$TMUX" && -n "$window_id" ]]; then
-    while IFS=' ' read -r pane cmd; do
-      _gwtmux_is_shell "$cmd" && continue
-      echo "  pane $pane: $cmd"
-    done < <(tmux list-panes -t "$window_id" -F '#{pane_index} #{pane_current_command}' 2>/dev/null)
-  fi
+  # One find for all processes, not one readlink each. Run from / so that
+  # find itself is not in the worktree. Processes of other users fail to
+  # resolve and are skipped.
+  while IFS=' ' read -r proc_dir cwd; do
+    [[ "$cwd" == "$real" || "$cwd" == "$real"/* ]] || continue
+    [[ "$in_window" == *" ${proc_dir#/proc/} "* ]] && continue
+    cmd=""
+    read -r cmd 2>/dev/null <"$proc_dir/comm" || continue
+    _gwtmux_is_shell "$cmd" && continue
+    echo "  pid ${proc_dir#/proc/}: $cmd"
+  done < <(cd / && find /proc/[0-9]*/cwd -maxdepth 0 -printf '%h %l\n' 2>/dev/null)
 }
 
 # True for a shell, or for tmux itself: a tmux server started from inside a
@@ -1307,8 +1399,9 @@ EOF
       # Check for nested worktrees when deleting worktree directory
       local -a _nested_worktrees=()
       if [[ $delete_worktree -eq 1 ]]; then
-        _gwtmux_check_worktree_idle "$worktree_root" "$gwt_window" || return 1
         _gwtmux_find_nested_worktrees "$(dirname "$git_common_dir")" "$worktree_root"
+        _gwtmux_check_removable "$worktree_root" "${_nested_worktrees[@]}" || return 1
+        _gwtmux_check_worktree_idle "$worktree_root" "$gwt_window" || return 1
         if [[ ${#_nested_worktrees[@]} -gt 0 ]]; then
           # Before the prompt: nothing destructive has run yet, and an unmerged
           # nested branch means "-b" cannot do what it promises.
@@ -1329,6 +1422,7 @@ EOF
 
       # Remove worktree if requested
       if [[ $delete_worktree -eq 1 ]]; then
+        _gwtmux_stop_window_processes "$gwt_window" || return 1
         local original_dir="$PWD"
         cd "$(dirname "$git_common_dir")"
         # Remove nested worktrees before parent
@@ -1476,6 +1570,9 @@ EOF
         _gwtmux_check_unique_window_name "$wt_path" "$git_root" "$wt_window_name" || return 1
 
         if [[ $delete_worktree -eq 1 ]]; then
+          local -a _nested_worktrees=()
+          _gwtmux_find_nested_worktrees "$git_root" "$wt_path"
+          _gwtmux_check_removable "$wt_path" "${_nested_worktrees[@]}" || return 1
           local wt_window_id=""
           [[ -n "$TMUX" ]] && wt_window_id="$(_gwtmux_window_id_by_name "$gwt_session" "$wt_window_name")"
           _gwtmux_check_worktree_idle "$wt_path" "$wt_window_id" || return 1
@@ -1538,6 +1635,15 @@ EOF
 
         # Remove worktree if requested
         if [[ $delete_worktree -eq 1 ]]; then
+          # Nothing removed yet, so a failure keeps the branch and the window,
+          # the same as a failed removal below.
+          local stop_window_id=""
+          [[ -n "$TMUX" ]] && stop_window_id="$(_gwtmux_window_id_by_name "$gwt_session" "$window_name")"
+          if ! _gwtmux_stop_window_processes "$stop_window_id"; then
+            had_failure=1
+            idx=$((idx + 1))
+            continue
+          fi
           local original_dir="$PWD"
           cd "$parent_dir"
           # Remove nested worktrees before parent

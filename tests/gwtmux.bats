@@ -3449,7 +3449,7 @@ myrepo/existing"
   assert_output --partial "nested"
 }
 
-@test "gwtmux -dwB <name>: refuses while a process runs in the worktree" {
+@test "gwtmux -dwB <name>: refuses while a process outside its window runs in the worktree" {
   [[ -r /proc/self/cwd ]] || skip "needs /proc"
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
@@ -3464,7 +3464,7 @@ myrepo/existing"
   run gwtmux -dwB busy
   kill "$server"
   assert_failure
-  assert_output --partial "processes still run in worktree"
+  assert_output --partial "processes outside its window still run in worktree"
   assert_output --partial "pid $server: sleep"
 
   # Nothing touched: worktree, branch and window all still there
@@ -3476,7 +3476,7 @@ myrepo/existing"
   get_tmux_windows | grep -Fxq "myrepo/busy"
 }
 
-@test "gwtmux -dwB: refuses in the current worktree while a process runs there" {
+@test "gwtmux -dwB: refuses in the current worktree while a process outside its window runs there" {
   [[ -r /proc/self/cwd ]] || skip "needs /proc"
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
@@ -3493,6 +3493,54 @@ myrepo/existing"
   assert_file_exists "$WORKTREE_PARENT/busy/README.md"
   run git -C "$MAIN_REPO" branch
   assert_output --partial "busy"
+}
+
+@test "gwtmux -dwB <name>: stops a file watcher in the worktree's window before the removal" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git worktree add "$WORKTREE_PARENT/busy" -b busy main >/dev/null 2>&1
+  echo ".cache/" >>"$(git rev-parse --git-common-dir)/info/exclude"
+
+  # Stands in for a dev server's file watcher: it writes into the tree all the
+  # time, so a removal that races it fails or leaves files behind.
+  local wt_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/busy" -c "$WORKTREE_PARENT/busy" -P -F "#{window_id}")
+  tmux send-keys -t "$wt_window" "bash -c 'while :; do mkdir -p .cache; : >.cache/x\$RANDOM; done'" Enter
+  wait_for_dir_exists "$WORKTREE_PARENT/busy/.cache"
+
+  local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$WORKTREE_PARENT" -P -F "#{window_id}")
+  send_cmd "$runner" "cd $WORKTREE_PARENT && gwtmux -dwB busy"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+
+  # Gone, and nothing comes back after the removal
+  sleep 0.5
+  refute [ -e "$WORKTREE_PARENT/busy" ]
+  refute tmux_window_exists "myrepo/busy"
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "busy"
+}
+
+@test "gwtmux -dwB <name>: refuses a dirty worktree before it stops anything in its window" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git worktree add "$WORKTREE_PARENT/busy" -b busy main >/dev/null 2>&1
+  echo "dirty" >>"$WORKTREE_PARENT/busy/README.md"
+
+  # Stands in for an editor: it must survive a refusal
+  local wt_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/busy" -c "$WORKTREE_PARENT/busy" -P -F "#{window_id}")
+  tmux send-keys -t "$wt_window" "sleep 300" Enter
+  wait_until "[ \"\$(tmux display-message -t '$wt_window' -p '#{pane_current_command}')\" = sleep ]"
+
+  local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$WORKTREE_PARENT" -P -F "#{window_id}")
+  send_cmd "$runner" "cd $WORKTREE_PARENT && gwtmux -dwB busy"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "1"
+
+  run tmux capture-pane -J -t "$runner" -p
+  assert_output --partial "modified or untracked files"
+  run tmux display-message -t "$wt_window" -p '#{pane_current_command}'
+  assert_output "sleep"
+  assert_dir_exists "$WORKTREE_PARENT/busy"
 }
 
 # ----------------------------------------------------------------------------

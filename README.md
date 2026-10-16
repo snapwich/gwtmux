@@ -253,12 +253,18 @@ a nested worktree with `--force`: uncommitted work there stops the operation,
 just as it does in the target itself. A target that gwtmux cannot remove keeps
 its branch and its tmux window, and the command exits non-zero.
 
-`-w` refuses to start while a process other than a shell still runs in a
-target, for example a dev server in one of its panes. The error lists each
-process. Stop them and run the command again. Without this check, git deletes
-most of the files and then fails on the files that the server still writes.
-On Linux, gwtmux finds every process whose working directory is in the
-worktree. On other systems, it examines only the panes of the worktree's window.
+`-w` stops the processes in the worktree's window (a dev server, an editor)
+before it removes the worktree, not after. A file watcher, such as `vite` in
+dev mode, writes new files while git deletes. When this happens, git deletes
+most of the files and then fails, or the files come back after git is done.
+gwtmux sends SIGHUP, as a closed window does, and then SIGTERM. If a process
+does not exit, the command stops and the worktree stays as it is. The shell of
+each pane, and the pane that runs gwtmux, are not stopped.
+
+Before it stops anything, `-w` refuses a target that git would refuse to
+remove (modified or untracked files). On Linux, it also refuses a target that
+a process outside the worktree's window still uses, for example a server in a
+different window. The error lists each such process.
 
 ### Rename
 
