@@ -918,7 +918,7 @@ myrepo/existing"
   refute [ -d "$WORKTREE_PARENT/detached-wt" ]
 }
 
-@test "gwtmux -d: refuses a worktree whose window name is not unique" {
+@test "gwtmux -d: never closes the window of another worktree with the same window name" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
@@ -928,16 +928,14 @@ myrepo/existing"
   git worktree add --detach "$WORKTREE_PARENT/one/det" "$commit_hash" >/dev/null 2>&1
   git worktree add --detach "$WORKTREE_PARENT/two/det" "$commit_hash" >/dev/null 2>&1
 
-  # The open window belongs to one/det. Killing by name while deleting two/det
-  # would close the wrong worktree's window.
+  # The open window belongs to one/det. It has no @gwtmux_path tag, and its
+  # pane is not in two/det, so deleting two/det must leave it open.
   tmux new-window -t "$TEST_SESSION" -n "myrepo/det" -c "$WORKTREE_PARENT/one/det" >/dev/null 2>&1
 
   run gwtmux -dw ../two/det
-  assert_failure
-  assert_output --partial "is not unique"
+  assert_success
 
-  # Refused in validation: nothing deleted, no window closed
-  assert_dir_exists "$WORKTREE_PARENT/two/det"
+  refute [ -d "$WORKTREE_PARENT/two/det" ]
   assert_dir_exists "$WORKTREE_PARENT/one/det"
   assert tmux_window_exists "myrepo/det"
 }
@@ -3659,7 +3657,7 @@ myrepo/existing"
 # Window name collisions
 # ----------------------------------------------------------------------------
 
-@test "gwtmux: errors on a path whose computed window name is not unique" {
+@test "gwtmux: names the second window of a used name after its parent dir" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
@@ -3671,13 +3669,88 @@ myrepo/existing"
   git worktree add --detach "$WORKTREE_PARENT/one/same" "$commit_hash" >/dev/null 2>&1
   git worktree add --detach "$WORKTREE_PARENT/two/same" "$commit_hash" >/dev/null 2>&1
 
-  local before_count="$(get_window_count)"
+  run gwtmux "$WORKTREE_PARENT/one/same"
+  assert_success
   run gwtmux "$WORKTREE_PARENT/two/same"
-  assert_failure
-  assert_output --partial "is not unique"
-  assert_output --partial "$WORKTREE_PARENT/one/same"
-  assert_output --partial "$WORKTREE_PARENT/two/same"
+  assert_success
+  assert tmux_window_exists "myrepo/same"
+  assert tmux_window_exists "myrepo/same@two"
+
+  # Each path finds its own window again, by its @gwtmux_path tag
+  local before_count="$(get_window_count)"
+  run gwtmux "$WORKTREE_PARENT/one/same"
+  assert_success
+  run gwtmux "$WORKTREE_PARENT/two/same"
+  assert_success
   assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux: opens a flat repo in its own window when another repo of that name has one" {
+  setup_flat_repo "j2"
+  local other="$TEST_TEMP_DIR/elsewhere/j2"
+  mkdir -p "$TEST_TEMP_DIR/elsewhere"
+  git clone "$FLAT_REMOTE" "$other" >/dev/null 2>&1
+
+  run gwtmux "$FLAT_REPO"
+  assert_success
+  run gwtmux "$other"
+  assert_success
+  assert tmux_window_exists "j2"
+  assert tmux_window_exists "j2@elsewhere"
+
+  local before_count="$(get_window_count)"
+  run gwtmux "$FLAT_REPO"
+  assert_success
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux: an untagged window of the same name in another repo is not a match" {
+  setup_flat_repo "j2"
+  local other="$TEST_TEMP_DIR/elsewhere/j2"
+  mkdir -p "$TEST_TEMP_DIR/elsewhere"
+  git clone "$FLAT_REMOTE" "$other" >/dev/null 2>&1
+
+  # Opened by hand (or by an older gwtmux): no @gwtmux_path tag, and its pane
+  # is in the other repo
+  tmux new-window -t "$TEST_SESSION" -n "j2" -c "$other" >/dev/null 2>&1
+
+  run gwtmux "$FLAT_REPO"
+  assert_success
+  assert tmux_window_exists "j2@flat"
+}
+
+@test "gwtmux -dw: closes only the window of its own worktree when two share a name" {
+  setup_flat_repo "j2"
+  mkdir -p "$TEST_TEMP_DIR/a" "$TEST_TEMP_DIR/b"
+  git -C "$FLAT_REPO" worktree add -b xa "$TEST_TEMP_DIR/a/x" main >/dev/null 2>&1
+  git -C "$FLAT_REPO" worktree add -b xb "$TEST_TEMP_DIR/b/x" main >/dev/null 2>&1
+  cd "$FLAT_REPO"
+
+  run gwtmux "$TEST_TEMP_DIR/a/x" "$TEST_TEMP_DIR/b/x"
+  assert_success
+  assert tmux_window_exists "j2/x"
+  assert tmux_window_exists "j2/x@b"
+
+  run gwtmux -dw "$TEST_TEMP_DIR/b/x"
+  assert_success
+  refute [ -d "$TEST_TEMP_DIR/b/x" ]
+  refute tmux_window_exists "j2/x@b"
+  assert tmux_window_exists "j2/x"
+}
+
+@test "gwtmux -l: marks only the repo whose window is open when two share a name" {
+  setup_flat_repo "j2"
+  local other="$TEST_TEMP_DIR/elsewhere/j2"
+  mkdir -p "$TEST_TEMP_DIR/elsewhere"
+  git clone "$FLAT_REMOTE" "$other" >/dev/null 2>&1
+  run gwtmux "$other"
+  assert_success
+  cd "$TEST_TEMP_DIR"
+
+  run gwtmux -l
+  assert_success
+  assert_line --regexp '^elsewhere/j2 +main +\*$'
+  assert_line --regexp '^flat/j2 +main$'
 }
 
 @test "gwtmux: opens a path whose directory name repeats but whose window name does not" {

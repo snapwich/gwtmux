@@ -63,8 +63,30 @@ run gwtmux inside a submodule.
 | worktree of a flat repo       | `<repo>/<dir name>` |
 
 The window name of a flat repo comes from the directory name, not from the branch. Thus an in-place
-`git switch` does not move the window. Two repos that have the same directory name in different
-locations get the same window name.
+`git switch` does not move the window.
+
+### Name collisions
+
+gwtmux finds the window of a worktree by its path, not by its name. Each window that gwtmux opens
+records the worktree path in the tmux window option `@gwtmux_path`. Thus two worktrees that compute
+the same name, for example two repos in directories of the same name, never share a window.
+
+When a window of a different worktree already has the name, the new window gets the name
+`<name>@<dir>`. `<dir>` is the nearest parent directory of the worktree that is not already part
+of the name. If that name is also in use, gwtmux adds more parent directories:
+
+| worktree                | window name     |
+| ----------------------- | --------------- |
+| `~/repos/gwtmux`        | `gwtmux`        |
+| `~/.local/share/gwtmux` | `gwtmux@share`  |
+| `~/a/myrepo/feat`       | `myrepo/feat`   |
+| `~/b/myrepo/feat`       | `myrepo/feat@b` |
+
+The first window to open gets the short name. gwtmux does not rename a window when the other one
+closes.
+
+A window without `@gwtmux_path` (opened by an older gwtmux, or by hand) matches by name, but only
+while its active pane is in the worktree.
 
 ### Window reuse
 

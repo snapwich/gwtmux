@@ -16,14 +16,71 @@ _gwtmux_display() {
   fi
 }
 
-# Resolve an exact window name to its window id within a session.
+# Resolve the window that shows a worktree to its window id within a session.
 # Window ids (@N) are stable; names and indexes can change mid-operation.
-_gwtmux_window_id_by_name() {
-  tmux list-windows -t "$1" -F "#{window_id} #{window_name}" 2>/dev/null |
-    awk -v name="$2" '{
-      win_name = substr($0, index($0, " ") + 1)
-      if (win_name == name) { print $1; exit }
-    }'
+# A window that gwtmux opened has the worktree path in @gwtmux_path, and that
+# path is what identifies the window. The name cannot: two repos in
+# directories of the same name compute the same name. A window without the
+# tag (opened by an older gwtmux, or by hand) matches by name, but only while
+# its active pane is inside the worktree.
+# Args: <session> <worktree_path> <window_name>
+_gwtmux_window_id_for() {
+  local wt_path
+  wt_path="$(cd "$2" 2>/dev/null && pwd -P)" || wt_path="$2"
+  tmux list-windows -t "$1" -F $'#{window_id}\t#{@gwtmux_path}\t#{pane_current_path}\t#{window_name}' 2>/dev/null |
+    awk -F'\t' -v path="$wt_path" -v name="$3" '
+      $2 == path { print $1; found = 1; exit }
+      $2 == "" && fallback == "" && $4 == name &&
+        ($3 == path || index($3, path "/") == 1) { fallback = $1 }
+      END { if (!found && fallback != "") print fallback }'
+}
+
+# Print a free name for the window of a worktree: <window_name>, or, when
+# another window of the session has that name, <window_name>@<dir>. <dir> is
+# the nearest parent directory of the worktree that is not already a part of
+# <window_name>; more parents are added ("@<dir2>/<dir>") until the name is
+# free. Lookups go by @gwtmux_path, so the name only has to be free now.
+# Args: <session> <worktree_path> <window_name> [own_window_id]
+#   own_window_id  a window that is about to take the name: its current name
+#                  (automatic-rename can make it the same) does not count
+_gwtmux_free_window_name() {
+  local names candidate="$3" dir="${2%/}" suffix="" part n=1
+  names=$'\n'"$(tmux list-windows -t "$1" -F $'#{window_id}\t#{window_name}' 2>/dev/null |
+    awk -F'\t' -v own="${4:-}" '$1 != own { print $2 }')"$'\n'
+  dir="${dir%/*}"
+  while [[ "$names" == *$'\n'"$candidate"$'\n'* ]]; do
+    if [[ -z "$dir" ]]; then
+      # Every parent is used: only a name set by hand can still collide.
+      n=$((n + 1))
+      candidate="$3${suffix:+@$suffix}-$n"
+      continue
+    fi
+    part="${dir##*/}"
+    dir="${dir%/*}"
+    [[ "/$3/" == *"/$part/"* ]] && continue
+    suffix="$part${suffix:+/$suffix}"
+    candidate="$3@$suffix"
+  done
+  echo "$candidate"
+}
+
+# Open a window for a worktree under a free name, tagged with its path.
+# Args: <session> <worktree_path> <window_name>
+_gwtmux_open_window() {
+  local wt_path window_id
+  wt_path="$(cd "$2" 2>/dev/null && pwd -P)" || wt_path="$2"
+  window_id="$(tmux new-window -t "$1" -n "$(_gwtmux_free_window_name "$1" "$wt_path" "$3")" \
+    -c "$wt_path" -P -F '#{window_id}')" || return 1
+  tmux set-window-option -t "$window_id" @gwtmux_path "$wt_path"
+}
+
+# Make an existing window the window of a worktree: free name and path tag.
+# Args: <window_id> <session> <worktree_path> <window_name>
+_gwtmux_claim_window() {
+  local wt_path
+  wt_path="$(cd "$3" 2>/dev/null && pwd -P)" || wt_path="$3"
+  tmux rename-window -t "$1" "$(_gwtmux_free_window_name "$2" "$wt_path" "$4" "$1")"
+  tmux set-window-option -t "$1" @gwtmux_path "$wt_path"
 }
 
 # Succeed if the invoking window is a throwaway shell window gwtmux may reuse
@@ -270,50 +327,6 @@ _gwtmux_resolve_worktree() {
   # Printed via [@] expansion: the one element, without an index that would
   # differ between bash and zsh.
   printf '%s\n' "${candidates[@]}"
-}
-
-# Refuse a worktree whose computed window name another worktree of the same repo
-# already claims. Two worktrees on one name means the window opened or killed
-# for the second is really the first one's. What collides is the NAME, not the
-# directory basename: a convention worktree is named "<parent>/<branch>" and a
-# flat repo root just "<repo>", so two worktrees can share a directory basename
-# and still be provably distinct windows - refusing those was a false positive.
-# Lazy like the resolver: only the worktree asked for is checked.
-# Args: <worktree_path> [git_root] [window_name]
-#   git_root and window_name are resolved from <worktree_path> when omitted;
-#   pass them when the caller has already computed them.
-_gwtmux_check_unique_window_name() {
-  local wt_path="$1" git_root="${2:-}" window_name="${3:-}"
-  local git_common_dir resolved_path other_path other_branch
-  local -a dupes=()
-
-  if [[ -z "$git_root" ]]; then
-    git_common_dir="$(_gwtmux_git_dir_path --git-common-dir "$wt_path")" || return 0
-    git_root="$(dirname -- "$git_common_dir")"
-  fi
-  [[ -z "$window_name" ]] && window_name="$(_gwtmux_window_name "$wt_path" "$git_root")"
-  [[ -z "$window_name" ]] && return 0
-
-  # git lists worktrees physically; compare like for like or the worktree being
-  # checked counts as a duplicate of itself.
-  resolved_path="$(cd "$wt_path" 2>/dev/null && pwd -P)"
-  [[ -z "$resolved_path" ]] && resolved_path="$wt_path"
-
-  while IFS=$'\t' read -r other_path other_branch; do
-    [[ -z "$other_path" || "$other_path" == "$resolved_path" ]] && continue
-    if [[ "$(_gwtmux_window_name "$other_path" "$git_root" "$other_branch")" == "$window_name" ]]; then
-      dupes+=("$other_path")
-    fi
-  done < <(_gwtmux_worktree_list "$git_root")
-
-  [[ ${#dupes[@]} -eq 0 ]] && return 0
-
-  echo >&2 "Error: window name '$window_name' is not unique in '$git_root' - these worktrees collide:"
-  echo >&2 "  - $resolved_path"
-  for other_path in "${dupes[@]}"; do
-    echo >&2 "  - $other_path"
-  done
-  return 1
 }
 
 # Resolve the branch to switch to before deleting the branch that a main repo
@@ -794,7 +807,7 @@ _gwtmux_worktree_porcelain() {
 #   picker 1 prefixes each line with "<absolute path>\t" for gwtmux -f
 
 _gwtmux_list() {
-  local root="${1:-.}" picker="${2:-0}" root_abs cwd_abs root_common="" common open_windows=""
+  local root="${1:-.}" picker="${2:-0}" root_abs cwd_abs root_common="" common open_windows="" open_paths="" window_list
 
   root_abs="$(cd "$root" 2>/dev/null && pwd -P)"
   if [[ -z "$root_abs" ]]; then
@@ -810,9 +823,13 @@ _gwtmux_list() {
     root_common="$common"
   fi
 
-  # Every window of the session, fetched once rather than once per worktree
+  # Every window of the session, fetched once rather than once per worktree.
+  # A window with the @gwtmux_path tag counts by path. A window without it
+  # (opened by an older gwtmux, or by hand) counts by name.
   if [[ -n "$TMUX" ]]; then
-    open_windows=$'\n'"$(tmux list-windows -t "$gwt_session" -F '#{window_name}' 2>/dev/null)"$'\n'
+    window_list="$(tmux list-windows -t "$gwt_session" -F $'#{@gwtmux_path}\t#{window_name}' 2>/dev/null)"
+    open_paths=$'\n'"$(awk -F'\t' '$1 != "" { print $1 }' <<<"$window_list")"$'\n'
+    open_windows=$'\n'"$(awk -F'\t' '$1 == "" { print $2 }' <<<"$window_list")"$'\n'
   fi
 
   # Resolve each .git hit to its common dir by reading git's on-disk layout
@@ -849,10 +866,12 @@ _gwtmux_list() {
         else
           label="$wt_branch"
           [[ -z "$label" ]] && label="(detached ${wt_head:0:7})"
-          # Every window name ends in the branch or the dir name, or is the
-          # repo dir name alone, so a worktree matching none of those cannot
-          # have a window: skip computing its name.
-          if [[ -n "$open_windows" ]] &&
+          # An untagged window name ends in the branch or the dir name, or is
+          # the repo dir name alone, so a worktree matching none of those
+          # cannot have one: skip computing its name.
+          if [[ "$open_paths" == *$'\n'"$wt_path"$'\n'* ]]; then
+            markers="*"
+          elif [[ -n "$open_windows" ]] &&
             [[ ( -n "$wt_branch" && "$open_windows" == *"/$wt_branch"$'\n'* ) ||
               "$open_windows" == *"/${wt_path##*/}"$'\n'* ||
               "$open_windows" == *$'\n'"${wt_path##*/}"$'\n'* ]]; then
@@ -1133,10 +1152,11 @@ FLAT REPOS:
   --rename at repo root     error                   error
 
   Windows are named <parent>/<branch> in a convention repo, and <repo> or
-  <repo>/<dir name> in a flat repo. Two worktrees of one repo cannot map to the
-  same window name: two flat worktrees in directories of the same name collide,
-  while two convention worktrees of the same directory name do not, because
-  their branches name their windows.
+  <repo>/<dir name> in a flat repo. When a window of a different worktree
+  already has that name, the new window gets <name>@<dir>, where <dir> is the
+  nearest parent directory that is not part of the name (more parents until
+  the name is free). gwtmux finds a window by its worktree path, not by its
+  name, so two worktrees with the same name never share a window.
 
 DONE MODE (-d):
   gwtmux -d                Delete current worktree's tmux window only
@@ -1495,6 +1515,8 @@ EOF
           # rename-window turns automatic-rename off for this window. Unset it
           # so the window follows the global setting and format again.
           tmux set-window-option -t "$gwt_window" -u automatic-rename
+          # The window no longer shows the worktree.
+          tmux set-window-option -t "$gwt_window" -u @gwtmux_path
         else
           # Not last window: kill as usual
           tmux kill-window -t "$gwt_window"
@@ -1518,7 +1540,7 @@ EOF
       # Arrays to store validated data
       local -a worktree_paths=()
       local -a branch_names=()
-      local -a window_names=()
+      local -a window_ids=()
       # Empty unless this target is the main repo root, where the branch can
       # only be deleted after the checkout steps off it (see below).
       local -a switch_branches=()
@@ -1578,19 +1600,18 @@ EOF
           _gwtmux_check_clean_tree "$wt_path" || return 1
         fi
 
-        # Same name normal mode gave the window when it opened this worktree.
-        # The window to close is found by that name, so a second worktree
-        # mapping to it would have ITS window killed instead - refuse here, in
-        # phase 1, before anything destructive runs.
-        local wt_window_name="$(_gwtmux_window_name "$wt_path" "$git_root" "$wt_branch")"
-        _gwtmux_check_unique_window_name "$wt_path" "$git_root" "$wt_window_name" || return 1
+        # Found now, while the worktree exists: a window without the
+        # @gwtmux_path tag matches only while its pane is in the worktree.
+        local wt_window_id=""
+        if [[ -n "$TMUX" ]]; then
+          wt_window_id="$(_gwtmux_window_id_for "$gwt_session" "$wt_path" \
+            "$(_gwtmux_window_name "$wt_path" "$git_root" "$wt_branch")")"
+        fi
 
         if [[ $delete_worktree -eq 1 ]]; then
           local -a _nested_worktrees=()
           _gwtmux_find_nested_worktrees "$git_root" "$wt_path"
           _gwtmux_check_removable "$wt_path" "${_nested_worktrees[@]}" || return 1
-          local wt_window_id=""
-          [[ -n "$TMUX" ]] && wt_window_id="$(_gwtmux_window_id_by_name "$gwt_session" "$wt_window_name")"
           _gwtmux_check_worktree_idle "$wt_path" "$wt_window_id" || return 1
         fi
 
@@ -1598,7 +1619,7 @@ EOF
         worktree_paths+=("$wt_path")
         branch_names+=("$wt_branch")
         switch_branches+=("$wt_switch_branch")
-        window_names+=("$wt_window_name")
+        window_ids+=("$wt_window_id")
       done
 
       # Check for nested worktrees across all parents
@@ -1646,16 +1667,14 @@ EOF
       while [[ $idx -lt $end_idx ]]; do
         local wt_path="${worktree_paths[$idx]}"
         local branch="${branch_names[$idx]}"
-        local window_name="${window_names[$idx]}"
+        local window_id="${window_ids[$idx]}"
         local switch_branch="${switch_branches[$idx]}"
 
         # Remove worktree if requested
         if [[ $delete_worktree -eq 1 ]]; then
           # Nothing removed yet, so a failure keeps the branch and the window,
           # the same as a failed removal below.
-          local stop_window_id=""
-          [[ -n "$TMUX" ]] && stop_window_id="$(_gwtmux_window_id_by_name "$gwt_session" "$window_name")"
-          if ! _gwtmux_stop_window_processes "$stop_window_id"; then
+          if ! _gwtmux_stop_window_processes "$window_id"; then
             had_failure=1
             idx=$((idx + 1))
             continue
@@ -1735,15 +1754,12 @@ EOF
         fi
 
         # Close tmux window for this worktree (defer if it's our own window)
-        if [[ -n "$TMUX" ]]; then
-          local target_window_id="$(_gwtmux_window_id_by_name "$gwt_session" "$window_name")"
-          if [[ -n "$target_window_id" ]]; then
-            if [[ "$target_window_id" == "$gwt_window" ]]; then
-              # Defer killing our own window until all other deletions are complete
-              deferred_kill=1
-            else
-              tmux kill-window -t "$target_window_id" 2>/dev/null || true
-            fi
+        if [[ -n "$TMUX" && -n "$window_id" ]]; then
+          if [[ "$window_id" == "$gwt_window" ]]; then
+            # Defer killing our own window until all other deletions are complete
+            deferred_kill=1
+          else
+            tmux kill-window -t "$window_id" 2>/dev/null || true
           fi
         fi
 
@@ -1760,6 +1776,8 @@ EOF
           # rename-window turns automatic-rename off for this window. Unset it
           # so the window follows the global setting and format again.
           tmux set-window-option -t "$gwt_window" -u automatic-rename
+          # The window no longer shows the worktree.
+          tmux set-window-option -t "$gwt_window" -u @gwtmux_path
         else
           # Not last window: kill as usual
           tmux kill-window -t "$gwt_window"
@@ -1891,7 +1909,7 @@ EOF
     fi
 
     # Update tmux window
-    tmux rename-window -t "$gwt_window" "$(_gwtmux_window_name "$new_path" "" "$new_name")"
+    _gwtmux_claim_window "$gwt_window" "$gwt_session" "$new_path" "$(_gwtmux_window_name "$new_path" "" "$new_name")"
     ;;
 
   normal)
@@ -1939,8 +1957,8 @@ EOF
             flat_window_name="$(_gwtmux_window_name "$flat_wt_path" "$noarg_root" "$flat_wt_branch")"
             [[ -z "$flat_window_name" ]] && continue
             flat_matched=$((flat_matched + 1))
-            if [[ -z "$(_gwtmux_window_id_by_name "$gwt_session" "$flat_window_name")" ]]; then
-              tmux new-window -t "$gwt_session" -n "$flat_window_name" -c "$flat_wt_path"
+            if [[ -z "$(_gwtmux_window_id_for "$gwt_session" "$flat_wt_path" "$flat_window_name")" ]]; then
+              _gwtmux_open_window "$gwt_session" "$flat_wt_path" "$flat_window_name"
             fi
           done < <(_gwtmux_worktree_list "$noarg_root")
 
@@ -1978,8 +1996,8 @@ EOF
           if [[ -n "$window_name" ]]; then
             noarg_matched=$((noarg_matched + 1))
             # Check if window already exists
-            if [[ -z "$(_gwtmux_window_id_by_name "$gwt_session" "$window_name")" ]]; then
-              tmux new-window -t "$gwt_session" -n "$window_name" -c "$worktree_path"
+            if [[ -z "$(_gwtmux_window_id_for "$gwt_session" "$worktree_path" "$window_name")" ]]; then
+              _gwtmux_open_window "$gwt_session" "$worktree_path" "$window_name"
             fi
           fi
         fi
@@ -2242,19 +2260,17 @@ EOF
       # Name the window. A worktree that does not exist yet cannot be read, so
       # pass its repo root and branch along.
       if [[ $path_matched -eq 1 ]]; then
-        # Check the name before a worktree that shares it sends us to some
-        # other worktree's window. The repo is resolved from the path itself:
-        # $git_root here belongs to the current directory, which an explicit
-        # path argument need not be part of.
+        # The repo is resolved from the path itself: $git_root here belongs to
+        # the current directory, which an explicit path argument need not be
+        # part of.
         window_name="$(_gwtmux_window_name "$worktree_path")"
-        _gwtmux_check_unique_window_name "$worktree_path" "" "$window_name" || return 1
       else
         window_name="$(_gwtmux_window_name "$worktree_path" "$git_root" "$branch")"
       fi
 
       # If window already exists, just select it (by id - name targets are
       # prefix/fuzzy matched by tmux and can hit the wrong window)
-      existing_window_id="$(_gwtmux_window_id_by_name "$gwt_session" "$window_name")"
+      existing_window_id="$(_gwtmux_window_id_for "$gwt_session" "$worktree_path" "$window_name")"
       if [[ -n "$existing_window_id" ]]; then
         tmux select-window -t "$existing_window_id"
         success_count=$((success_count + 1))
@@ -2291,10 +2307,10 @@ EOF
 
       # Create or reuse window
       if [[ $success_count -eq 0 && $can_reuse_window -eq 1 ]]; then
-        tmux rename-window -t "$gwt_window" "$window_name"
+        _gwtmux_claim_window "$gwt_window" "$gwt_session" "$worktree_path" "$window_name"
         reused_window_path="$worktree_path"
       else
-        tmux new-window -t "$gwt_session" -n "$window_name" -c "$worktree_path"
+        _gwtmux_open_window "$gwt_session" "$worktree_path" "$window_name"
       fi
 
       success_count=$((success_count + 1))
