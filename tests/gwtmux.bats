@@ -171,7 +171,7 @@ setup_flat_repo() {
 # Setup a git repo that CONTAINS other repos, the way a dotfiles repo in $HOME
 # or a monorepo above ~/repos does. Nothing below it is tracked; it exists so
 # that the repo resolver can reach it from any directory underneath, which is
-# what made no-arg mode pick the wrong repo. Its own worktree gives the windows
+# what made -a pick the wrong repo. Its own worktree gives the windows
 # it must NOT open a name to assert against ("ancestor", "ancestor/ancestor-wt").
 setup_ancestor_repo() {
   ANCESTOR_REPO="$TEST_TEMP_DIR/ancestor"
@@ -291,7 +291,7 @@ setup() {
   #
   # On macOS $BATS_TEST_TMPDIR sits under /var/folders, and /var is a symlink
   # to /private/var. git reports worktree paths physically ("/private/var/..."),
-  # while $PWD in a tmux pane keeps the logical "/var/..." form. gwtmux's no-arg
+  # while $PWD in a tmux pane keeps the logical "/var/..." form. gwtmux's -a
   # mode opens only the worktrees whose parent directory equals $PWD, so under
   # the logical path it matched nothing, created no windows and still exited 0.
   # Linux CI has no such symlink, so the suite was green there.
@@ -876,7 +876,7 @@ myrepo/existing"
   refute tmux_window_exists "myrepo/"
 }
 
-@test "gwtmux: no args names detached HEAD worktree after its directory" {
+@test "gwtmux -a: names detached HEAD worktree after its directory" {
   setup_worktree_structure "myrepo"
   cd "$WORKTREE_PARENT"
 
@@ -884,7 +884,7 @@ myrepo/existing"
   git -C default worktree add -b feature-1 "$WORKTREE_PARENT/feature-1" main >/dev/null 2>&1
   git -C default worktree add --detach "$WORKTREE_PARENT/detached-wt" "$commit_hash" >/dev/null 2>&1
 
-  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux"
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux -a"
   wait_for_window_exists "myrepo/detached-wt"
   wait_cmd_done
 
@@ -943,10 +943,10 @@ myrepo/existing"
 }
 
 # ----------------------------------------------------------------------------
-# Multi-worktree mode (no arguments)
+# Multi-worktree mode (-a)
 # ----------------------------------------------------------------------------
 
-@test "gwtmux: no args opens all worktrees in windows" {
+@test "gwtmux -a: opens all worktrees in windows" {
   setup_worktree_structure "myrepo"
   cd "$WORKTREE_PARENT"
 
@@ -955,7 +955,7 @@ myrepo/existing"
   git -C default worktree add -b feature-2 "$WORKTREE_PARENT/feature-2" main >/dev/null 2>&1
 
   # Run gwtmux without arguments from parent directory
-  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux"
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux -a"
   wait_for_window_exists "myrepo/feature-2"
   wait_cmd_done
 
@@ -966,12 +966,12 @@ myrepo/existing"
   assert_output --partial "myrepo/feature-2"
 }
 
-@test "gwtmux: no args errors if not in parent of default/.git" {
+@test "gwtmux -a: errors if not in parent of default/.git" {
   cd "$TEST_TEMP_DIR"
 
-  run gwtmux
+  run gwtmux -a
   assert_failure
-  assert_output --partial "branch or PR number required"
+  assert_output --partial "-a needs a repo parent dir"
 }
 
 # ----------------------------------------------------------------------------
@@ -4157,7 +4157,7 @@ EOF
   refute [ -d "$TEST_TEMP_DIR/plain/x" ]
 }
 
-@test "gwtmux: no args opens a flat repo and its worktrees" {
+@test "gwtmux -a: opens a flat repo and its worktrees" {
   setup_flat_repo "j2"
   git -C "$FLAT_REPO" worktree add "$FLAT_PARENT/j2-work" -b work main >/dev/null 2>&1
 
@@ -4165,7 +4165,7 @@ EOF
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
   tmux rename-window -t "$first_window" "$shell_name"
 
-  send_cmd "$first_window" "cd $FLAT_REPO && gwtmux"
+  send_cmd "$first_window" "cd $FLAT_REPO && gwtmux -a"
   wait_for_window_exists "j2/j2-work"
   wait_cmd_done
 
@@ -4175,7 +4175,7 @@ EOF
   refute tmux_window_exists "$shell_name"
 }
 
-@test "gwtmux: no args closes a single-pane window named by automatic-rename-format" {
+@test "gwtmux -a: closes a single-pane window named by automatic-rename-format" {
   setup_flat_repo "j2"
   git -C "$FLAT_REPO" worktree add "$FLAT_PARENT/j2-work" -b work main >/dev/null 2>&1
 
@@ -4183,7 +4183,7 @@ EOF
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
   tmux set-window-option -t "$first_window" automatic-rename on
 
-  send_cmd "$first_window" "cd $FLAT_REPO && gwtmux"
+  send_cmd "$first_window" "cd $FLAT_REPO && gwtmux -a"
   wait_for_window_exists "j2/j2-work"
   wait_until "! tmux list-windows -a -F '#{window_id}' | grep -Fxq '$first_window'"
 
@@ -4191,26 +4191,26 @@ EOF
   assert_equal "$(get_window_count)" "2"
 }
 
-@test "gwtmux: no args works from a subdirectory of a flat repo" {
+@test "gwtmux -a: works from a subdirectory of a flat repo" {
   setup_flat_repo "j2"
   mkdir -p "$FLAT_REPO/src/deep"
 
   local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$TEST_TEMP_DIR" -P -F "#{window_id}")
 
-  send_cmd "$runner" "cd $FLAT_REPO/src/deep && gwtmux"
+  send_cmd "$runner" "cd $FLAT_REPO/src/deep && gwtmux -a"
   wait_for_window_exists "j2"
   wait_cmd_done
 
   assert tmux_window_exists "j2"
 }
 
-@test "gwtmux: no args works from inside a flat repo's worktree" {
+@test "gwtmux -a: works from inside a flat repo's worktree" {
   setup_flat_repo "j2"
   git -C "$FLAT_REPO" worktree add "$FLAT_PARENT/j2-work" -b work main >/dev/null 2>&1
 
   local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$TEST_TEMP_DIR" -P -F "#{window_id}")
 
-  send_cmd "$runner" "cd $FLAT_PARENT/j2-work && gwtmux"
+  send_cmd "$runner" "cd $FLAT_PARENT/j2-work && gwtmux -a"
   wait_for_window_exists "j2"
   wait_cmd_done
 
@@ -4218,16 +4218,16 @@ EOF
   assert tmux_window_exists "j2/j2-work"
 }
 
-@test "gwtmux: no args still errors in a directory that only contains repos" {
+@test "gwtmux -a: still errors in a directory that only contains repos" {
   setup_flat_repo "j2"
   cd "$FLAT_PARENT"
 
-  run gwtmux
+  run gwtmux -a
   assert_failure
-  assert_output --partial "branch or PR number required"
+  assert_output --partial "-a needs a repo parent dir"
 }
 
-@test "gwtmux: no args in a convention parent under an ancestor repo stays convention" {
+@test "gwtmux -a: in a convention parent under an ancestor repo stays convention" {
   setup_worktree_structure "myrepo"
   setup_ancestor_repo
 
@@ -4241,7 +4241,7 @@ EOF
   MAIN_REPO="$WORKTREE_PARENT/default"
   git -C "$MAIN_REPO" worktree add -b feature-1 "$WORKTREE_PARENT/feature-1" main >/dev/null 2>&1
 
-  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux"
+  send_cmd "$TEST_SESSION" "cd $WORKTREE_PARENT && gwtmux -a"
   wait_for_window_exists "myrepo/feature-1"
   # The reusable shell window is killed, so the marker can never be written:
   # wait_cmd_done finishes on the pane disappearing instead.
@@ -4254,7 +4254,7 @@ EOF
   refute tmux_window_exists "ancestor/ancestor-wt"
 }
 
-@test "gwtmux: no args inside a flat repo under an ancestor repo opens the inner repo" {
+@test "gwtmux -a: inside a flat repo under an ancestor repo opens the inner repo" {
   setup_flat_repo "j2"
   setup_ancestor_repo
 
@@ -4265,7 +4265,7 @@ EOF
 
   local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$TEST_TEMP_DIR" -P -F "#{window_id}")
 
-  send_cmd "$runner" "cd $FLAT_REPO && gwtmux"
+  send_cmd "$runner" "cd $FLAT_REPO && gwtmux -a"
   wait_for_window_exists "j2/j2-work"
   wait_cmd_done
   assert_equal "$(cat "$CMD_MARKER")" "0"
@@ -4634,7 +4634,7 @@ EOF
   assert_output --partial "origin/test-branch"
 }
 
-@test "gwtmux: no args opens worktrees when the parent is reached through a symlink" {
+@test "gwtmux -a: opens worktrees when the parent is reached through a symlink" {
   setup_worktree_structure "myrepo"
   git -C "$MAIN_REPO" worktree add -b feature-1 \
     "$WORKTREE_PARENT/feature-1" main >/dev/null 2>&1
@@ -4643,13 +4643,13 @@ EOF
   # reporting worktree paths physically.
   ln -s "$WORKTREE_PARENT" "$TEST_TEMP_DIR/link"
 
-  # Deliberately not named after the shell: no-arg mode would kill it, and this
+  # Deliberately not named after the shell: -a would kill it, and this
   # test is about the windows it opens.
   local new_window
   new_window=$(tmux new-window -t "$TEST_SESSION" -n "probe" \
     -c "$TEST_TEMP_DIR" -P -F "#{window_id}")
 
-  send_cmd "$new_window" "cd $TEST_TEMP_DIR/link && gwtmux"
+  send_cmd "$new_window" "cd $TEST_TEMP_DIR/link && gwtmux -a"
   wait_for_window_exists "myrepo/feature-1"
   wait_cmd_done
 
@@ -4737,7 +4737,7 @@ setup_submodule() {
 # convention repo. The convention loop then matched none of its worktrees -
 # their parent is the repo's parent, never $PWD - opened no window, and killed
 # the reusable shell window anyway, taking the whole session with it.
-@test "gwtmux: no args in a flat repo holding a plain default/ subdir opens the repo" {
+@test "gwtmux -a: in a flat repo holding a plain default/ subdir opens the repo" {
   setup_flat_repo "j2"
   mkdir -p "$FLAT_REPO/default"
   echo "cfg" >"$FLAT_REPO/default/cfg"
@@ -4747,7 +4747,7 @@ setup_submodule() {
 
   local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$TEST_TEMP_DIR" -P -F "#{window_id}")
 
-  send_cmd "$runner" "cd $FLAT_REPO && gwtmux"
+  send_cmd "$runner" "cd $FLAT_REPO && gwtmux -a"
   wait_for_window_exists "j2/j2-work"
   wait_cmd_done
   assert_equal "$(cat "$CMD_MARKER")" "0"
@@ -4763,14 +4763,14 @@ setup_submodule() {
 # repo, so D13 answers it - open the repo it belongs to. What the "default/"
 # name used to do instead was send gwtmux down the convention branch, which
 # matched nothing, opened nothing, and killed the shell window anyway.
-@test "gwtmux: no args in a subdir holding a non-repo default/ opens the repo it belongs to" {
+@test "gwtmux -a: in a subdir holding a non-repo default/ opens the repo it belongs to" {
   setup_ancestor_repo
   mkdir -p "$ANCESTOR_REPO/proj/default"
   echo "notarepo" >"$ANCESTOR_REPO/proj/default/file"
 
   local runner=$(tmux new-window -t "$TEST_SESSION" -n "runner" -c "$TEST_TEMP_DIR" -P -F "#{window_id}")
 
-  send_cmd "$runner" "cd $ANCESTOR_REPO/proj && gwtmux"
+  send_cmd "$runner" "cd $ANCESTOR_REPO/proj && gwtmux -a"
   wait_for_window_exists "ancestor/ancestor-wt"
   wait_cmd_done
   assert_equal "$(cat "$CMD_MARKER")" "0"
@@ -4783,7 +4783,7 @@ setup_submodule() {
 # Normal mode resolved the repo from the cwd's --git-common-dir before it ever
 # considered "$PWD/default", so a branch argument typed in a convention parent
 # that sits inside another repo aimed at the ANCESTOR repo. Convention wins,
-# the same rule the no-arg dispatch follows.
+# the same rule the -a dispatch follows.
 @test "gwtmux: branch arg from a convention parent under an ancestor repo uses the inner repo" {
   setup_worktree_structure "myrepo"
   setup_ancestor_repo
@@ -5070,6 +5070,59 @@ EOF2
   assert_output "$(printf '%s\t%s\n' \
     "$MAIN_REPO" "$MAIN_REPO   main" \
     "$WORKTREE_PARENT/feat" "$WORKTREE_PARENT/feat      feat")"
+}
+
+@test "gwtmux: no args opens the worktree picked in fzf" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  stub_fzf
+  echo "/feat" >"$TEST_TEMP_DIR/fzf_pick"
+
+  send_cmd "$TEST_SESSION" "cd $TEST_TEMP_DIR && GWTMUX_ROOT=$WORKTREE_PARENT gwtmux"
+  wait_for_window_exists "myrepo/feat"
+  wait_cmd_done
+
+  assert tmux_window_exists "myrepo/feat"
+}
+
+@test "gwtmux: no args picks from GWTMUX_ROOT, not from cwd" {
+  setup_worktree_structure "myrepo"
+  setup_flat_repo "j2"
+  stub_fzf
+  : >"$TEST_TEMP_DIR/fzf_pick"
+  cd "$FLAT_REPO"
+
+  NO_COLOR=1 GWTMUX_ROOT="$WORKTREE_PARENT" run gwtmux
+  assert_success
+
+  run cat "$TEST_TEMP_DIR/fzf_input"
+  assert_output --partial "$MAIN_REPO"
+  refute_output --partial "$FLAT_REPO"
+}
+
+@test "gwtmux: no args without GWTMUX_ROOT picks from HOME, not from cwd" {
+  setup_worktree_structure "myrepo"
+  setup_flat_repo "j2"
+  stub_fzf
+  : >"$TEST_TEMP_DIR/fzf_pick"
+  cd "$FLAT_REPO"
+
+  # -f in the same place would list only j2. HOME holds both repos.
+  NO_COLOR=1 HOME="$TEST_TEMP_DIR" GWTMUX_ROOT="" run gwtmux
+  assert_success
+
+  run cat "$TEST_TEMP_DIR/fzf_input"
+  assert_output --partial "$MAIN_REPO"
+  assert_output --partial "$FLAT_REPO"
+}
+
+@test "gwtmux -a: takes no arguments" {
+  setup_worktree_structure "myrepo"
+  cd "$WORKTREE_PARENT"
+
+  run gwtmux -a feat
+  assert_failure
+  assert_output --partial "-a takes no arguments"
 }
 
 @test "gwtmux -f: colors repo groups, not a lone flat repo; dims the parent dir, bolds the worktree dir" {

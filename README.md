@@ -44,7 +44,7 @@ run gwtmux inside a submodule.
 | `gwtmux <branch>` / `<pr>` | yes                     | error                   |
 | `gwtmux <path>`            | yes                     | yes, opens window       |
 | `gwtmux ./<new dir>`       | yes                     | yes                     |
-| `gwtmux` (no args)         | from parent dir         | from inside repo        |
+| `gwtmux -a`                | from parent dir         | from inside repo        |
 | `-d`                       | yes                     | yes                     |
 | `-dw` on root              | error                   | error                   |
 | `-dbB` on root             | yes (switch to primary) | yes (switch to primary) |
@@ -84,7 +84,7 @@ window to the name of your shell and turns `automatic-rename` back to your globa
 - **Batch operations**: Open multiple worktrees at once with `gwtmux branch1 branch2 branch3`
 - **Cleanup**: Remove worktrees, delete branches (local/remote), and close tmux windows
 - **List**: Show all worktrees under a directory as a tree with `gwtmux -l`
-- **Pick**: Fuzzy-find worktrees with fzf and open them with `gwtmux -f`
+- **Pick**: Fuzzy-find worktrees with fzf and open them with `gwtmux` or `gwtmux -f`
 - **Rename**: Atomically rename worktree directory, branch, remote tracking, and tmux window
 
 ## Dependencies
@@ -98,7 +98,7 @@ window to the name of your shell and turns `automatic-rename` back to your globa
 
 - `gh` (GitHub CLI) - enables PR number support
 - `fd` - makes `gwtmux -l` faster on large trees (falls back to `find`)
-- `fzf` - enables `gwtmux -f`
+- `fzf` - enables `gwtmux -f` and `gwtmux` with no arguments
 
 ## Installation
 
@@ -126,7 +126,7 @@ gwtmux feature-1 feature-2 bugfix-3
 
 # Open all existing worktrees in windows (run from repo parent dir,
 # or from anywhere inside a flat repo)
-gwtmux
+gwtmux -a
 
 # Open an existing worktree by path
 gwtmux ../other-worktree
@@ -194,9 +194,13 @@ If `fd` is installed, gwtmux uses it for the walk. `fd` is much faster than
 ### Pick with fzf
 
 ```bash
+gwtmux               # root: $GWTMUX_ROOT, else ~
 gwtmux -f            # root: $GWTMUX_ROOT, else the current directory
 gwtmux -f ~/repos
 ```
+
+`gwtmux` with no arguments is the same as `gwtmux -f`, but its default root is
+your home directory. Thus it finds all your repos from any directory.
 
 `-f` shows the `-l` worktrees in fzf as flat rows, not as a tree. When fzf
 hides rows that do not match, a tree would show a worktree below the wrong
@@ -209,14 +213,17 @@ multi-select) and gwtmux opens a window for each. Esc cancels. The preview
 shows `git status -sb` and the last 100 commits. Missing worktrees are not
 shown. You can see bare repos, but you cannot select them.
 
-To open the picker from anywhere, set `GWTMUX_ROOT` and bind it to a popup:
+If your repos are not below `~`, or `~` holds many repos that are not yours
+(editor plugins, for example), set `GWTMUX_ROOT`:
 
 ```bash
 export GWTMUX_ROOT=~/repos
 ```
 
+To open the picker from a tmux popup:
+
 ```tmux
-bind-key g display-popup -E -w 80% -h 60% "zsh -ic 'gwtmux -f'"
+bind-key g display-popup -E -w 80% -h 60% "zsh -ic gwtmux"
 ```
 
 From a popup, gwtmux always opens new windows. It does not reuse the shell

@@ -1083,7 +1083,9 @@ Create git worktrees from branches or PR numbers in new tmux windows.
 Manage worktree lifecycle with cleanup and rename operations.
 
 USAGE:
+  gwtmux                           Pick worktree(s) under $GWTMUX_ROOT or ~ with fzf
   gwtmux [<branch_or_pr>...]       Create worktree(s) and open in tmux window(s)
+  gwtmux -a                        Open windows for all worktrees of this repo
   gwtmux -d [flags] [worktree...]  Clean up worktree(s), branches, and tmux windows
   gwtmux --rename <new_name>       Rename current worktree, branch, and tmux window
   gwtmux -l, --list [root]         List worktrees from root (default: cwd) down
@@ -1097,7 +1099,9 @@ NORMAL MODE:
   gwtmux ./<new_dir>       Create worktree at that path, branch = its basename
   gwtmux <repo>/<branch>   Create branch in repo at <repo>/default
   gwtmux branch1 branch2   Create multiple worktrees at once
-  gwtmux                   Open windows for all existing worktrees
+  gwtmux                   Same as "gwtmux -f", with the root $GWTMUX_ROOT,
+                           else ~ (not cwd)
+  gwtmux -a                Open windows for all existing worktrees
                            (from the repo parent dir, or inside a flat repo)
 
   If window already exists for the branch, it will be selected instead.
@@ -1120,7 +1124,7 @@ FLAT REPOS:
   gwtmux <branch> | <pr>    yes                     error
   gwtmux <path>             yes                     yes, opens window
   gwtmux ./<new_dir>        yes                     yes
-  gwtmux (no args)          from parent dir         from inside repo
+  gwtmux -a                 from parent dir         from inside repo
   -d                        yes                     yes
   -dw on repo root          error                   error
   -db, -dB on repo root     yes (switch to primary) yes (switch to primary)
@@ -1184,8 +1188,9 @@ PICK MODE (-f):
   gwtmux -f [root]         Show the -l tree in fzf (--multi), open the picked
                            worktrees. root defaults to $GWTMUX_ROOT, then cwd.
                            Missing worktrees are left out. Requires fzf.
+  gwtmux                   The same, but root defaults to $GWTMUX_ROOT, then ~.
   In a tmux popup:
-    bind-key g display-popup -E -w 80% -h 60% "zsh -ic 'gwtmux -f'"
+    bind-key g display-popup -E -w 80% -h 60% "zsh -ic gwtmux"
 
 EXAMPLES:
   gwtmux feature/auth      Create worktree for feature/auth branch
@@ -1198,7 +1203,7 @@ REQUIREMENTS:
   - git, tmux (required)
   - gh (optional, for PR number support)
   - fd (optional, makes -l faster on large trees)
-  - fzf (optional, for -f)
+  - fzf (optional, for -f and for gwtmux with no arguments)
   - Must be run inside tmux session
   - Submodules are not supported: the repo gwtmux resolves inside one is the
     superproject. -d refuses to run there; the refusal does not reach a
@@ -1219,8 +1224,19 @@ EOF
   fi
 
   # Detect mode based on flags
-  local mode="normal"
-  if [[ "$1" == "-l" || "$1" == "--list" ]]; then
+  local mode="normal" open_all=0
+  if [[ $# -eq 0 ]]; then
+    # No arguments: pick from everything, not only from below cwd as -f does.
+    _gwtmux_pick "${GWTMUX_ROOT:-$HOME}"
+    return
+  elif [[ "$1" == "-a" ]]; then
+    if [[ $# -gt 1 ]]; then
+      echo >&2 "Error: -a takes no arguments"
+      return 1
+    fi
+    open_all=1
+    shift
+  elif [[ "$1" == "-l" || "$1" == "--list" ]]; then
     shift
     if [[ $# -gt 1 ]]; then
       echo >&2 "Error: -l takes at most one root path"
@@ -1881,7 +1897,7 @@ EOF
   normal)
     # ========================================================================
     # NORMAL MODE: create a git worktree from branch or pr number in new tmux window
-    # Usage: gwtmux [<branch_or_pr>...]
+    # Usage: gwtmux <branch_or_pr>... | gwtmux -a
     # ========================================================================
 
     local -r git_cmd="git"
@@ -1895,7 +1911,7 @@ EOF
     local can_reuse_window=0
     _gwtmux_window_reusable && can_reuse_window=1
 
-    if [[ $# -eq 0 ]]; then
+    if [[ $open_all -eq 1 ]]; then
       # Convention mode is decided first, on "$PWD/default is a repo ROOT".
       # Testing flat-ness first would key the dispatch on whatever repo the
       # current directory belongs to - including an ANCESTOR repo (a dotfiles
@@ -1942,7 +1958,7 @@ EOF
         fi
 
         # Neither layout: not a flat repo and no "default/" here.
-        echo >&2 "Error: branch or PR number required"
+        echo >&2 "Error: -a needs a repo parent dir (holds default/) or a flat repo"
         return 1
       fi
 
@@ -1987,7 +2003,7 @@ EOF
     local git_common_dir git_root
     local has_git_root=0
     if _gwtmux_is_repo_root "$PWD/default"; then
-      # Convention wins, same rule the no-arg dispatch applies: a convention
+      # Convention wins, same rule the -a dispatch applies: a convention
       # parent that happens to sit inside another git repo (a dotfiles repo at
       # ~, a monorepo above ~/repos) used to resolve to the ANCESTOR repo, so
       # "gwtmux <branch>" standing in the parent aimed at a repo the user never
