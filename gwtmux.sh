@@ -2085,6 +2085,8 @@ EOF
     # Save original directory for resolving relative args after cd
     local orig_pwd="$PWD"
     local reused_window_path=""
+    # Set when the invoking window became, or already was, a worktree window
+    local current_window_used=0
 
     # Process each argument
     for arg in "$@"; do
@@ -2272,6 +2274,7 @@ EOF
       # prefix/fuzzy matched by tmux and can hit the wrong window)
       existing_window_id="$(_gwtmux_window_id_for "$gwt_session" "$worktree_path" "$window_name")"
       if [[ -n "$existing_window_id" ]]; then
+        [[ "$existing_window_id" == "$current_window_id" ]] && current_window_used=1
         tmux select-window -t "$existing_window_id"
         success_count=$((success_count + 1))
         continue
@@ -2309,6 +2312,7 @@ EOF
       if [[ $success_count -eq 0 && $can_reuse_window -eq 1 ]]; then
         _gwtmux_claim_window "$gwt_window" "$gwt_session" "$worktree_path" "$window_name"
         reused_window_path="$worktree_path"
+        current_window_used=1
       else
         _gwtmux_open_window "$gwt_session" "$worktree_path" "$window_name"
       fi
@@ -2319,6 +2323,13 @@ EOF
     # cd into reused window's worktree (deferred to avoid being undone by loop's cd "$orig_pwd")
     if [[ -n "$reused_window_path" ]]; then
       cd "$reused_window_path"
+    fi
+
+    # Every worktree went to a window that was already open, so the reusable
+    # shell window was not claimed. Close it, as -a does, rather than leave an
+    # unused window behind. Last: it kills the shell that runs this function.
+    if [[ $success_count -gt 0 && $can_reuse_window -eq 1 && $current_window_used -eq 0 ]]; then
+      tmux kill-window -t "$current_window_id"
     fi
     ;;
   esac

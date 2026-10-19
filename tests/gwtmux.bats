@@ -580,7 +580,7 @@ teardown() {
   assert_dir_exists "$WORKTREE_PARENT/not-a-pr"
 }
 
-@test "gwtmux: selects existing window if already exists" {
+@test "gwtmux: selects existing window and closes the reusable shell window" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
 
@@ -588,21 +588,38 @@ teardown() {
   git worktree add -b existing "$WORKTREE_PARENT/existing" main >/dev/null 2>&1
 
   # Create tmux window for it
-  tmux new-window -t "$TEST_SESSION" -n "myrepo/existing" -c "$WORKTREE_PARENT/existing" 2>/dev/null
+  local existing_window
+  existing_window="$(tmux new-window -t "$TEST_SESSION" -n "myrepo/existing" -c "$WORKTREE_PARENT/existing" -P -F '#{window_id}')"
 
   # Try to create again - should just select the window
   local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
   send_cmd "$first_window" "cd $MAIN_REPO && gwtmux existing"
-  wait_for_window_exists "myrepo/existing"
   wait_cmd_done
-  # Without this the claim holds just as well when gwtmux fails outright: a
-  # command that does nothing also creates no duplicate window.
-  assert_equal "$(cat "$CMD_MARKER")" "0"
+
+  # The shell window was not used, so it is closed (no marker: gwtmux kills
+  # its own window). A failure would leave it open.
+  refute tmux list-panes -t "$first_window" >/dev/null 2>&1
 
   # Should have selected the window (not created a duplicate)
-  run get_tmux_windows
-  refute_output --partial "myrepo/existing
-myrepo/existing"
+  assert_equal "$(get_tmux_windows)" "myrepo/existing"
+  assert_equal "$(tmux display-message -p -t "$TEST_SESSION" '#{window_id}')" "$existing_window"
+}
+
+@test "gwtmux: selects existing window and keeps a window renamed by hand" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+
+  git worktree add -b existing "$WORKTREE_PARENT/existing" main >/dev/null 2>&1
+  tmux new-window -t "$TEST_SESSION" -n "myrepo/existing" -c "$WORKTREE_PARENT/existing" 2>/dev/null
+
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux rename-window -t "$first_window" "notes"
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux existing"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+
+  assert_equal "$(get_window_count)" "2"
+  assert_equal "$(tmux display-message -p -t "$first_window" '#W')" "notes"
 }
 
 @test "gwtmux: opens existing worktree via relative path" {
@@ -1206,9 +1223,11 @@ myrepo/existing"
   wait_for_dir_exists "$WORKTREE_PARENT/new-one"
   wait_cmd_done
 
-  # Should have one more window (new-one), not duplicates
+  # One more window (new-one), not duplicates. The shell window was not
+  # reused, since the first worktree already had a window, so it is closed.
   local window_count_after=$(get_window_count)
-  assert_equal "$((window_count_before + 1))" "$window_count_after"
+  assert_equal "$window_count_after" "$window_count_before"
+  refute tmux list-panes -t "$first_window" >/dev/null 2>&1
 
   # new-one worktree should be created
   assert_dir_exists "$WORKTREE_PARENT/new-one"
@@ -4359,11 +4378,11 @@ EOF
 
   send_cmd "$first_window" "cd $TEST_TEMP_DIR && gwtmux $FLAT_REPO"
   wait_cmd_done
-  # An outright failure also leaves the window count alone, so the count means
-  # nothing unless gwtmux succeeded.
-  assert_equal "$(cat "$CMD_MARKER")" "0"
+  # The unused shell window is closed, so no marker is written. An outright
+  # failure leaves it open.
+  refute tmux list-panes -t "$first_window" >/dev/null 2>&1
 
-  assert_equal "$(get_window_count)" "$before_count"
+  assert_equal "$(get_window_count)" "$((before_count - 1))"
   # The count alone survives the existing-window lookup being deleted: gwtmux
   # then RENAMES the invoking window to "j2" instead of selecting the window
   # that is already there, which keeps the count and leaves two windows called

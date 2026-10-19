@@ -95,6 +95,9 @@ that you did not set. That is, tmux names the window automatically (`automatic-r
 any `automatic-rename-format`), or the window name is the name of your shell. To keep a window,
 rename it (`prefix ,`).
 
+When the first worktree needs a new window, it gets this window. When the first worktree already
+has a window, gwtmux selects that window and closes the window that you called it from.
+
 When `gwtmux -d` closes the last window of a session, it does not kill the window. It renames the
 window to the name of your shell and turns `automatic-rename` back to your global setting.
 
