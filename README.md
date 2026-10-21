@@ -101,6 +101,24 @@ has a window, gwtmux selects that window and closes the window that you called i
 When `gwtmux -d` closes the last window of a session, it does not kill the window. It renames the
 window to the name of your shell and turns `automatic-rename` back to your global setting.
 
+### PR tag
+
+When the branch of a worktree has a pull request, gwtmux puts its number (for example `#123`) in
+the `@gwtmux_pr` option of the window. The window name does not change. gwtmux looks up the PR with
+`gh` in the background when it opens, reuses, or selects a window, and when `gwtmux -a` finds a
+window that is already open. Thus a PR that starts after the window opens shows the next time you go
+to that worktree with gwtmux. When a window has a tag, gwtmux does not look up its PR again. When
+`gh` is not installed, gwtmux does no lookups.
+
+tmux does not show the tag until you add it to a format. Add these lines to `~/.tmux.conf` to show it
+in the window tabs and in `choose-tree` (`prefix w`):
+
+```tmux
+set -g window-status-format         '#I:#W#F#{?@gwtmux_pr, #{@gwtmux_pr},}'
+set -g window-status-current-format '#I:#W#F#{?@gwtmux_pr, #{@gwtmux_pr},}'
+bind w choose-tree -Zw -F '#{?window_format,#{window_name}#{window_flags}#{?@gwtmux_pr, #{@gwtmux_pr},},#{?pane_format,#{pane_current_command} "#{pane_title}",#{session_windows} windows#{?session_attached, (attached),}}}'
+```
+
 ## Features
 
 - **Create worktrees**: Open branches or PRs in new tmux windows with `gwtmux <branch>`, or
@@ -121,7 +139,7 @@ window to the name of your shell and turns `automatic-rename` back to your globa
 
 **Optional:**
 
-- `gh` (GitHub CLI) - enables PR number support
+- `gh` (GitHub CLI) - enables PR number support and the PR tag
 - `fd` - makes `gwtmux -l` faster on large trees (falls back to `find`)
 - `fzf` - enables `gwtmux -f` and `gwtmux` with no arguments
 

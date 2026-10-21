@@ -223,6 +223,43 @@ stub_gh_pr_multi() {
   chmod +x "$STUB_DIR/gh"
 }
 
+# Create a fake gh that answers "gh pr view --json number" (the PR tag lookup)
+# for the branch checked out in the current directory. Each lookup adds its
+# directory to $STUB_DIR/gh-pr-lookups. The answer waits
+# GH_STUB_DELAY seconds, so a test can make it land after gwtmux has returned.
+# Usage: stub_gh_pr_number "branch-a" "12" "branch-b" "34"
+stub_gh_pr_number() {
+  {
+    echo '#!/bin/bash'
+    echo 'if [[ "$1 $2 $3 $4" == "pr view --json number" ]]; then'
+    echo '  echo "$PWD" >>"$(dirname "$0")/gh-pr-lookups"'
+    echo '  sleep "${GH_STUB_DELAY:-0}"'
+    echo '  case "$(git branch --show-current 2>/dev/null)" in'
+    while [[ $# -ge 2 ]]; do
+      echo "    '$1') echo '$2'; exit 0 ;;"
+      shift 2
+    done
+    echo '  esac'
+    echo '  echo "no pull requests found" >&2'
+    echo 'fi'
+    echo 'exit 1'
+  } >"$STUB_DIR/gh"
+  chmod +x "$STUB_DIR/gh"
+}
+
+# Print the id of the window tagged with <worktree_path>.
+window_id_for_path() {
+  local wt_path
+  wt_path="$(cd "$1" && pwd -P)"
+  tmux list-windows -t "$TEST_SESSION" -F $'#{window_id}\t#{@gwtmux_path}' |
+    awk -F'\t' -v path="$wt_path" '$2 == path { print $1; exit }'
+}
+
+# Print the @gwtmux_pr tag of a window (empty when it has none).
+get_pr_tag() {
+  tmux show-window-options -v -t "$1" @gwtmux_pr 2>/dev/null || true
+}
+
 # Print $PATH with every dir that holds one of the named commands swapped for
 # a symlinked copy without them. Dropping such a dir outright can drop git
 # too (/usr/bin), so the rest of the dir has to stay reachable.
@@ -1612,6 +1649,137 @@ teardown() {
   local first_wt_pane_path
   first_wt_pane_path=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_name} #{pane_current_path}" | grep "pr-123-feat" | awk '{print $2}')
   [[ "$first_wt_pane_path" == *"/pr-123-feat" ]]
+}
+
+# ----------------------------------------------------------------------------
+# PR tag (@gwtmux_pr)
+# ----------------------------------------------------------------------------
+
+@test "gwtmux: tags a new window with the PR of its branch" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  stub_gh_pr_number "feat" "42"
+
+  # A name set by hand keeps the shell window, so gwtmux opens a new window.
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux rename-window -t "$first_window" "notes"
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux feat"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+
+  local window_id="$(window_id_for_path "$WORKTREE_PARENT/feat")"
+  assert [ -n "$window_id" ]
+  wait_until "[ \"\$(get_pr_tag '$window_id')\" = '#42' ]"
+  assert_equal "$(get_pr_tag "$window_id")" "#42"
+  # The tag is not part of the name.
+  assert_equal "$(tmux display-message -p -t "$window_id" '#W')" "myrepo/feat"
+  assert_equal "$(get_pr_tag "$first_window")" ""
+}
+
+@test "gwtmux: tags the reused shell window and drops its old tag" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  git worktree add -b no-pr "$WORKTREE_PARENT/no-pr" main >/dev/null 2>&1
+  stub_gh_pr_number "feat" "42"
+
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  # A tag from an earlier worktree: the next worktree must not show it.
+  tmux set-window-option -t "$first_window" @gwtmux_pr "#7"
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux no-pr"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+
+  assert_equal "$(window_id_for_path "$WORKTREE_PARENT/no-pr")" "$first_window"
+  assert_equal "$(get_pr_tag "$first_window")" ""
+}
+
+@test "gwtmux: looks up the PR of an untagged window it selects" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+
+  # The window opened before the PR started: no tag.
+  stub_gh_fail
+  local existing_window
+  existing_window="$(tmux new-window -t "$TEST_SESSION" -n "myrepo/feat" -c "$WORKTREE_PARENT/feat" -P -F '#{window_id}')"
+  tmux set-window-option -t "$existing_window" @gwtmux_path "$(cd "$WORKTREE_PARENT/feat" && pwd -P)"
+  assert_equal "$(get_pr_tag "$existing_window")" ""
+
+  stub_gh_pr_number "feat" "42"
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux rename-window -t "$first_window" "notes"
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux feat"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+
+  wait_until "[ \"\$(get_pr_tag '$existing_window')\" = '#42' ]"
+  assert_equal "$(get_pr_tag "$existing_window")" "#42"
+}
+
+@test "gwtmux: does not look up the PR of a tagged window again" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  stub_gh_pr_number "feat" "42"
+
+  local existing_window
+  existing_window="$(tmux new-window -t "$TEST_SESSION" -n "myrepo/feat" -c "$WORKTREE_PARENT/feat" -P -F '#{window_id}')"
+  tmux set-window-option -t "$existing_window" @gwtmux_path "$(cd "$WORKTREE_PARENT/feat" && pwd -P)"
+  tmux set-window-option -t "$existing_window" @gwtmux_pr "#7"
+
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  tmux rename-window -t "$first_window" "notes"
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux feat"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+
+  # A lookup runs in the background; give one time to land before the check.
+  sleep 1
+  assert_file_not_exists "$STUB_DIR/gh-pr-lookups"
+  assert_equal "$(get_pr_tag "$existing_window")" "#7"
+}
+
+@test "gwtmux -a: tags windows after it closes the shell window" {
+  setup_worktree_structure "myrepo"
+  cd "$WORKTREE_PARENT"
+  git -C default worktree add -b feature-1 "$WORKTREE_PARENT/feature-1" main >/dev/null 2>&1
+  git -C default worktree add -b feature-2 "$WORKTREE_PARENT/feature-2" main >/dev/null 2>&1
+  # The answers come after gwtmux has killed the shell window it ran in. A
+  # shell without job control (bash -c, as in a key binding) keeps the lookups
+  # in the pane's foreground process group, which gets SIGHUP when the window
+  # closes. The lookups must live through that.
+  stub_gh_pr_number "feature-1" "11" "feature-2" "22"
+  local first_window=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  send_cmd "$first_window" "GH_STUB_DELAY=1 bash -c 'source \"$BATS_TEST_DIRNAME/../gwtmux.sh\" && cd $WORKTREE_PARENT && gwtmux -a'"
+  wait_cmd_done
+  refute tmux list-panes -t "$first_window" >/dev/null 2>&1
+
+  local id1="$(window_id_for_path "$WORKTREE_PARENT/feature-1")"
+  local id2="$(window_id_for_path "$WORKTREE_PARENT/feature-2")"
+  wait_until "[ \"\$(get_pr_tag '$id1')\" = '#11' ] && [ \"\$(get_pr_tag '$id2')\" = '#22' ]"
+  assert_equal "$(get_pr_tag "$id1")" "#11"
+  assert_equal "$(get_pr_tag "$id2")" "#22"
+  assert_equal "$(get_pr_tag "$(window_id_for_path "$WORKTREE_PARENT/default")")" ""
+}
+
+@test "gwtmux -d: last window drops its PR tag" {
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git worktree add "$WORKTREE_PARENT/test-wt" -b test-branch main >/dev/null 2>&1
+  stub_gh_fail
+
+  local window_id=$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)
+  local expected_shell=$(basename "${SHELL:-zsh}")
+  tmux set-window-option -g automatic-rename off
+  tmux set-window-option -t "$window_id" @gwtmux_pr "#42"
+
+  send_cmd "$window_id" "cd $WORKTREE_PARENT/test-wt && gwtmux -d"
+  wait_until "[ \"\$(tmux display-message -t '$window_id' -p '#W')\" = '$expected_shell' ]"
+  wait_cmd_done
+
+  assert_equal "$(get_pr_tag "$window_id")" ""
 }
 
 # ============================================================================

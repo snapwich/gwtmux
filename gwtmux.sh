@@ -72,6 +72,7 @@ _gwtmux_open_window() {
   window_id="$(tmux new-window -t "$1" -n "$(_gwtmux_free_window_name "$1" "$wt_path" "$3")" \
     -c "$wt_path" -P -F '#{window_id}')" || return 1
   tmux set-window-option -t "$window_id" @gwtmux_path "$wt_path"
+  _gwtmux_tag_pr "$window_id" "$wt_path"
 }
 
 # Make an existing window the window of a worktree: free name and path tag.
@@ -81,6 +82,35 @@ _gwtmux_claim_window() {
   wt_path="$(cd "$3" 2>/dev/null && pwd -P)" || wt_path="$3"
   tmux rename-window -t "$1" "$(_gwtmux_free_window_name "$2" "$wt_path" "$4" "$1")"
   tmux set-window-option -t "$1" @gwtmux_path "$wt_path"
+  # The tag of the window's last worktree is not this worktree's PR.
+  tmux set-window-option -t "$1" -u @gwtmux_pr
+  _gwtmux_tag_pr "$1" "$wt_path"
+}
+
+# Put the number of the worktree's pull request ("#123") in the @gwtmux_pr
+# option of its window, for a status or choose-tree format to show. The name
+# stays as it is: it is a lookup key, and a PR often starts after the window.
+# gh asks GitHub, so the lookup runs in the background and the window does not
+# wait for it. When gh is missing or finds no PR, the tag stays as it is.
+# A window that has a tag is not looked up again: the number of a branch's PR
+# does not change, and a window changes branch only in _gwtmux_claim_window,
+# which removes the tag first.
+# Args: <window_id> <worktree_path>
+_gwtmux_tag_pr() {
+  command -v gh >/dev/null 2>&1 || return 0
+  [[ -n "$(tmux show-window-options -v -t "$1" @gwtmux_pr 2>/dev/null)" ]] && return 0
+  # The outer subshell keeps the job out of the shell's job table, so an
+  # interactive shell shows no job number or "done" message. SIGHUP is
+  # ignored because the terminal can close just after this: gwtmux kills its
+  # own window, and a popup closes when gwtmux returns. A shell without job
+  # control (bash -c, zsh -c) keeps the lookup in the terminal's foreground
+  # process group, which gets that SIGHUP before the tag is set.
+  ( (
+    trap '' HUP
+    pr="$(cd "$2" && GH_PAGER= GH_PROMPT_DISABLED=1 gh pr view --json number --jq .number </dev/null)" &&
+      [[ "$pr" =~ ^[0-9]+$ ]] &&
+      tmux set-window-option -t "$1" @gwtmux_pr "#$pr"
+  ) >/dev/null 2>&1 & )
 }
 
 # Succeed if the invoking window is a throwaway shell window gwtmux may reuse
@@ -1517,6 +1547,7 @@ EOF
           tmux set-window-option -t "$gwt_window" -u automatic-rename
           # The window no longer shows the worktree.
           tmux set-window-option -t "$gwt_window" -u @gwtmux_path
+          tmux set-window-option -t "$gwt_window" -u @gwtmux_pr
         else
           # Not last window: kill as usual
           tmux kill-window -t "$gwt_window"
@@ -1778,6 +1809,7 @@ EOF
           tmux set-window-option -t "$gwt_window" -u automatic-rename
           # The window no longer shows the worktree.
           tmux set-window-option -t "$gwt_window" -u @gwtmux_path
+          tmux set-window-option -t "$gwt_window" -u @gwtmux_pr
         else
           # Not last window: kill as usual
           tmux kill-window -t "$gwt_window"
@@ -1950,15 +1982,18 @@ EOF
           _gwtmux_is_flat "$noarg_root"; then
           # Declared before the loop: zsh echoes a re-declared local that
           # carries no assignment.
-          local flat_wt_path="" flat_wt_branch="" flat_window_name=""
+          local flat_wt_path="" flat_wt_branch="" flat_window_name="" flat_window_id=""
           local flat_matched=0
           while IFS=$'\t' read -r flat_wt_path flat_wt_branch; do
             [[ -z "$flat_wt_path" ]] && continue
             flat_window_name="$(_gwtmux_window_name "$flat_wt_path" "$noarg_root" "$flat_wt_branch")"
             [[ -z "$flat_window_name" ]] && continue
             flat_matched=$((flat_matched + 1))
-            if [[ -z "$(_gwtmux_window_id_for "$gwt_session" "$flat_wt_path" "$flat_window_name")" ]]; then
+            flat_window_id="$(_gwtmux_window_id_for "$gwt_session" "$flat_wt_path" "$flat_window_name")"
+            if [[ -z "$flat_window_id" ]]; then
               _gwtmux_open_window "$gwt_session" "$flat_wt_path" "$flat_window_name"
+            else
+              _gwtmux_tag_pr "$flat_window_id" "$flat_wt_path"
             fi
           done < <(_gwtmux_worktree_list "$noarg_root")
 
@@ -1996,8 +2031,11 @@ EOF
           if [[ -n "$window_name" ]]; then
             noarg_matched=$((noarg_matched + 1))
             # Check if window already exists
-            if [[ -z "$(_gwtmux_window_id_for "$gwt_session" "$worktree_path" "$window_name")" ]]; then
+            local noarg_window_id="$(_gwtmux_window_id_for "$gwt_session" "$worktree_path" "$window_name")"
+            if [[ -z "$noarg_window_id" ]]; then
               _gwtmux_open_window "$gwt_session" "$worktree_path" "$window_name"
+            else
+              _gwtmux_tag_pr "$noarg_window_id" "$worktree_path"
             fi
           fi
         fi
@@ -2276,6 +2314,8 @@ EOF
       if [[ -n "$existing_window_id" ]]; then
         [[ "$existing_window_id" == "$current_window_id" ]] && current_window_used=1
         tmux select-window -t "$existing_window_id"
+        # A PR can start after the window opened: look again if it has no tag.
+        _gwtmux_tag_pr "$existing_window_id" "$worktree_path"
         success_count=$((success_count + 1))
         continue
       fi
