@@ -437,27 +437,33 @@ _gwtmux_check_removable() {
 
 # Print "<pid> <command>" for each process that runs in the panes of the given
 # windows: the processes that closing those windows ends. The interactive shell
-# of each pane is left out, and so is the whole pane that runs gwtmux.
+# of each pane is left out, and so is the whole pane that runs gwtmux. Find that
+# pane from the parents of this shell, not from TMUX_PANE: a popup wrapper can set
+# TMUX_PANE to the pane behind the popup for window lookups, but gwtmux does not
+# run in that pane, so a program there must stop. A program that started gwtmux,
+# such as an editor with a terminal, must not stop before gwtmux is done.
 # Args: <window_id>...
 _gwtmux_window_processes() {
   local window_id roots="" pid is_root cmd
   [[ -n "$TMUX" ]] || return 0
   for window_id in "$@"; do
     [[ -n "$window_id" ]] || continue
-    roots+="$(tmux list-panes -t "$window_id" -F '#{pane_id} #{pane_pid}' 2>/dev/null |
-      awk -v own="${TMUX_PANE:-}" '$1 != own { printf " %s", $2 }')"
+    roots+="$(tmux list-panes -t "$window_id" -F '#{pane_pid}' 2>/dev/null |
+      awk '{ printf " %s", $1 }')"
   done
   [[ -n "$roots" ]] || return 0
 
   # One ps for the whole process table; awk follows it down from each pane's
   # first process to all of its descendants.
-  ps -A -o pid= -o ppid= -o comm= 2>/dev/null | awk -v roots="$roots" '
-    { pid[NR] = $1; ppid[NR] = $2
+  ps -A -o pid= -o ppid= -o comm= 2>/dev/null | awk -v roots="$roots" -v self="$$" '
+    { pid[NR] = $1; ppid[NR] = $2; parent[$1] = $2
       cmd = $3; for (i = 4; i <= NF; i++) cmd = cmd " " $i
       sub(/.*\//, "", cmd); name[$1] = cmd }
     END {
       n = split(roots, r, " ")
-      for (i = 1; i <= n; i++) { tree[r[i]] = 1; root[r[i]] = 1 }
+      for (i = 1; i <= n; i++) root[r[i]] = 1
+      for (p = self; p in parent; p = parent[p]) delete root[p]
+      for (p in root) tree[p] = 1
       do {
         added = 0
         for (i = 1; i <= NR; i++)

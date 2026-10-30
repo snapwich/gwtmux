@@ -3705,6 +3705,54 @@ teardown() {
   refute_output --partial "busy"
 }
 
+@test "gwtmux -dwB: from a popup, stops the program in the pane behind it" {
+  [[ -r /proc/self/cwd ]] || skip "needs /proc"
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git worktree add "$WORKTREE_PARENT/busy" -b busy main >/dev/null 2>&1
+
+  # Stands in for an editor in the pane that opened the popup
+  local wt_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/busy" -c "$WORKTREE_PARENT/busy" -P -F "#{window_id}")
+  tmux send-keys -t "$wt_window" "sleep 300" Enter
+  wait_until "[ \"\$(tmux display-message -t '$wt_window' -p '#{pane_current_command}')\" = sleep ]"
+
+  # The shell of a popup runs in no pane, and a wrapper sets TMUX_PANE to the
+  # pane behind the popup for window lookups, the same as here.
+  export TMUX_PANE="$(tmux display-message -t "$wt_window" -p '#{pane_id}')"
+  cd "$WORKTREE_PARENT/busy"
+  run gwtmux -dwB
+  assert_success
+
+  refute [ -e "$WORKTREE_PARENT/busy" ]
+  refute tmux_window_exists "myrepo/busy"
+  run git -C "$MAIN_REPO" branch
+  refute_output --partial "busy"
+}
+
+@test "gwtmux -dwB: refuses, and does not stop, the program in its pane that started it" {
+  [[ -r /proc/self/cwd ]] || skip "needs /proc"
+  script -qfc true /dev/null >/dev/null 2>&1 || skip "needs util-linux script"
+  setup_worktree_structure "myrepo"
+  cd "$MAIN_REPO"
+  git worktree add "$WORKTREE_PARENT/busy" -b busy main >/dev/null 2>&1
+
+  # Stands in for an editor with a terminal: the shell that runs gwtmux is a
+  # child of the program, and it ends when the program ends.
+  local wt_window=$(tmux new-window -t "$TEST_SESSION" -n "myrepo/busy" -c "$WORKTREE_PARENT/busy" -P -F "#{window_id}")
+  tmux send-keys -t "$wt_window" "script -qfc \"bash --rcfile '$TEST_BASHRC' -i\" /dev/null" Enter
+  wait_until "[ \"\$(tmux display-message -t '$wt_window' -p '#{pane_current_command}')\" = script ]"
+
+  send_cmd "$wt_window" "gwtmux -dwB"
+  wait_cmd_done
+  assert_equal "$(cat "$CMD_MARKER")" "1"
+
+  run tmux capture-pane -J -t "$wt_window" -p
+  assert_output --partial ": script"
+  run tmux display-message -t "$wt_window" -p '#{pane_current_command}'
+  assert_output "script"
+  assert_dir_exists "$WORKTREE_PARENT/busy"
+}
+
 @test "gwtmux -dwB <name>: refuses a dirty worktree before it stops anything in its window" {
   setup_worktree_structure "myrepo"
   cd "$MAIN_REPO"
