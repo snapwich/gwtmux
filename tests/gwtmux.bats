@@ -5549,3 +5549,177 @@ j2           main
 OUT
 )"
 }
+
+# ============================================================================
+# TESTS: gwtmux -b (background) and -y (no prompt)
+# ============================================================================
+
+# Print the id of the active window of the test session.
+active_window_id() {
+  tmux display-message -p -t "$TEST_SESSION" '#{window_id}'
+}
+
+# Run gwtmux in the pane with no controlling terminal, as a script or an
+# agent's shell runs it: setsid starts a new session, so /dev/tty cannot open.
+# Usage: send_cmd_no_tty <target> <gwtmux args>
+send_cmd_no_tty() {
+  send_cmd "$1" "cd $MAIN_REPO && setsid -w bash -c 'source \"${BATS_TEST_DIRNAME}/../gwtmux.sh\"; gwtmux $2' </dev/null >$TEST_TEMP_DIR/out 2>$TEST_TEMP_DIR/err"
+}
+
+@test "gwtmux -b: opens a new window in the background and keeps the reusable shell window" {
+  setup_worktree_structure "myrepo"
+  local first_window="$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)"
+  # Reusable: one pane, automatic-rename on
+  tmux set-window-option -t "$first_window" automatic-rename on
+  local before_count="$(get_window_count)"
+
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux -b bg-branch"
+  confirm_branch_creation "$first_window"
+  wait_cmd_done
+
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+  assert_dir_exists "$WORKTREE_PARENT/bg-branch"
+  assert_equal "$(get_window_count)" "$((before_count + 1))"
+  assert tmux_window_exists "myrepo/bg-branch"
+  # The focus stays on the window gwtmux was called from, and its name stays
+  assert_equal "$(active_window_id)" "$first_window"
+  assert_not_equal "$(tmux display-message -p -t "$first_window" '#W')" "myrepo/bg-branch"
+}
+
+@test "gwtmux -b: does not select an existing window and says so" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b existing "$WORKTREE_PARENT/existing" main >/dev/null 2>&1
+  tmux new-window -d -t "$TEST_SESSION" -n "myrepo/existing" -c "$WORKTREE_PARENT/existing"
+  local first_window="$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)"
+  tmux set-window-option -t "$first_window" automatic-rename on
+  tmux select-window -t "$first_window"
+  local before_count="$(get_window_count)"
+
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux -b existing >$TEST_TEMP_DIR/out"
+  wait_cmd_done
+
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+  run cat "$TEST_TEMP_DIR/out"
+  assert_output "Window 'myrepo/existing' already exists"
+  # Not selected, and the reusable shell window is not closed
+  assert_equal "$(active_window_id)" "$first_window"
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux -b -a: opens all windows in the background and keeps the shell window" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feature-1 "$WORKTREE_PARENT/feature-1" main >/dev/null 2>&1
+  local first_window="$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)"
+  tmux set-window-option -t "$first_window" automatic-rename on
+
+  send_cmd "$first_window" "cd $WORKTREE_PARENT && gwtmux -a -b"
+  wait_cmd_done
+
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+  assert tmux_window_exists "myrepo/default"
+  assert tmux_window_exists "myrepo/feature-1"
+  assert_equal "$(active_window_id)" "$first_window"
+}
+
+@test "gwtmux -b -f: opens the picked worktree in the background" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b feat "$WORKTREE_PARENT/feat" main >/dev/null 2>&1
+  stub_fzf
+  echo "/feat" >"$TEST_TEMP_DIR/fzf_pick"
+  local first_window="$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)"
+  tmux set-window-option -t "$first_window" automatic-rename on
+
+  send_cmd "$first_window" "cd $WORKTREE_PARENT && gwtmux -b -f"
+  wait_cmd_done
+
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+  assert tmux_window_exists "myrepo/feat"
+  assert_equal "$(active_window_id)" "$first_window"
+}
+
+@test "gwtmux -y: creates a new branch with no prompt" {
+  setup_worktree_structure "myrepo"
+
+  send_cmd "$TEST_SESSION" "cd $MAIN_REPO && gwtmux --yes yes-branch"
+  wait_for_dir_exists "$WORKTREE_PARENT/yes-branch"
+  wait_cmd_done
+
+  assert tmux_window_exists "myrepo/yes-branch"
+  run tmux capture-pane -t "$TEST_SESSION" -p
+  refute_output --partial "Create new branch"
+}
+
+@test "gwtmux -y: with no terminal, creates the branch and opens the window" {
+  setup_worktree_structure "myrepo"
+  local first_window="$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)"
+
+  send_cmd_no_tty "$first_window" "-by notty-yes"
+  wait_cmd_done
+
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+  assert_dir_exists "$WORKTREE_PARENT/notty-yes"
+  assert tmux_window_exists "myrepo/notty-yes"
+  assert_equal "$(active_window_id)" "$first_window"
+}
+
+@test "gwtmux: with no terminal and no -y, does not create a new branch" {
+  setup_worktree_structure "myrepo"
+  local before_count="$(get_window_count)"
+
+  send_cmd_no_tty "$TEST_SESSION" "notty-no"
+  wait_cmd_done
+
+  assert_equal "$(cat "$CMD_MARKER")" "1"
+  run cat "$TEST_TEMP_DIR/err"
+  assert_output --partial "Use -y to create it"
+  refute [ -d "$WORKTREE_PARENT/notty-no" ]
+  run git -C "$MAIN_REPO" branch --list notty-no
+  assert_output ""
+  assert_equal "$(get_window_count)" "$before_count"
+}
+
+@test "gwtmux: with no terminal, still opens a branch that exists" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" branch local-only main >/dev/null 2>&1
+
+  send_cmd_no_tty "$TEST_SESSION" "-b local-only"
+  wait_cmd_done
+
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+  assert tmux_window_exists "myrepo/local-only"
+}
+
+@test "gwtmux: -b and -y after the branch name are flags, not branches" {
+  setup_worktree_structure "myrepo"
+  local first_window="$(tmux list-windows -t "$TEST_SESSION" -F "#{window_id}" | head -1)"
+
+  send_cmd "$first_window" "cd $MAIN_REPO && gwtmux late-flags --background -y"
+  wait_cmd_done
+
+  assert_equal "$(cat "$CMD_MARKER")" "0"
+  assert tmux_window_exists "myrepo/late-flags"
+  assert_equal "$(active_window_id)" "$first_window"
+  run git -C "$MAIN_REPO" branch --format='%(refname:short)'
+  refute_output --partial -- "-b"
+  refute_output --partial -- "-y"
+}
+
+@test "gwtmux: -b before -d is an error and deletes nothing" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b keep "$WORKTREE_PARENT/keep" main >/dev/null 2>&1
+
+  run gwtmux -b -dw keep
+  assert_failure
+  assert_output --partial "-b and -y work only in the modes that open windows"
+  assert_dir_exists "$WORKTREE_PARENT/keep"
+}
+
+@test "gwtmux -d: does not take --background as a flag of its own" {
+  setup_worktree_structure "myrepo"
+  git -C "$MAIN_REPO" worktree add -b keep "$WORKTREE_PARENT/keep" main >/dev/null 2>&1
+
+  run gwtmux -d --background
+  assert_failure
+  assert_output --partial "unknown option"
+  assert_dir_exists "$WORKTREE_PARENT/keep"
+}

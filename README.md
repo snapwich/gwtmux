@@ -98,6 +98,8 @@ rename it (`prefix ,`).
 When the first worktree needs a new window, it gets this window. When the first worktree already
 has a window, gwtmux selects that window and closes the window that you called it from.
 
+With `-b`, gwtmux does not reuse or close the window that you call it from.
+
 When `gwtmux -d` closes the last window of a session, it does not kill the window. It renames the
 window to the name of your shell and turns `automatic-rename` back to your global setting.
 
@@ -176,7 +178,23 @@ gwtmux ../other-worktree
 
 # Create a worktree at a new path (branch = the last path component)
 gwtmux ./scratch/feature-x
+
+# Open the window in the background and create the branch with no prompt
+gwtmux -b -y feature-branch
 ```
+
+`-b` (`--background`) opens the new windows in the background: the focus stays on the current
+window. gwtmux does not use the current window for a worktree and does not close it. When a window
+for the worktree is already open, gwtmux does not select it, and prints
+`Window '<name>' already exists`.
+
+`-y` (`--yes`) creates a new branch with no `Create new branch?` prompt. Use it when there is no
+terminal, for example in a script or in the shell of an agent. Without `-y` and with no terminal,
+gwtmux does not create the branch, and exits with 1.
+
+The two flags combine as `-by`. They can be at any position in the arguments, and they also apply
+to `gwtmux -a`, `gwtmux -f` and `gwtmux` with no arguments. When gwtmux cannot open a worktree, it
+continues with the other arguments and exits with 1.
 
 An argument counts as a path when it has the shape of a path (`/...`, `./...`,
 `../...`, `.` or `..`) or when it is the root of a worktree. A path argument

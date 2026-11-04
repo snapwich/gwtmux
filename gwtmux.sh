@@ -65,11 +65,14 @@ _gwtmux_free_window_name() {
 }
 
 # Open a window for a worktree under a free name, tagged with its path.
-# Args: <session> <worktree_path> <window_name>
+# With <background> 1, the new window does not take the focus.
+# Args: <session> <worktree_path> <window_name> [background]
 _gwtmux_open_window() {
-  local wt_path window_id
+  local wt_path window_id detach=""
+  [[ "${4:-0}" == 1 ]] && detach="-d"
   wt_path="$(cd "$2" 2>/dev/null && pwd -P)" || wt_path="$2"
-  window_id="$(tmux new-window -t "$1" -n "$(_gwtmux_free_window_name "$1" "$wt_path" "$3")" \
+  window_id="$(tmux new-window ${detach:+"$detach"} -t "$1" \
+    -n "$(_gwtmux_free_window_name "$1" "$wt_path" "$3")" \
     -c "$wt_path" -P -F '#{window_id}')" || return 1
   tmux set-window-option -t "$window_id" @gwtmux_path "$wt_path"
   _gwtmux_tag_pr "$window_id" "$wt_path"
@@ -1093,8 +1096,12 @@ _gwtmux_list() {
 
 # Pick worktrees with fzf and open them. fzf shows the -l tree and matches on
 # it, but returns the hidden first column, so the tree text is never parsed.
-# Args: [root] (defaults to $GWTMUX_ROOT, then $PWD)
+# <open_flags> are the letters of the -b and -y flags ("", "b", "y" or "by"),
+# for the gwtmux call that opens the picked worktrees.
+# Args: <open_flags> [root] (root defaults to $GWTMUX_ROOT, then $PWD)
 _gwtmux_pick() {
+  local open_flags="$1"
+  shift
   if ! command -v fzf >/dev/null 2>&1; then
     echo >&2 "Error: gwtmux -f requires fzf"
     return 1
@@ -1119,7 +1126,7 @@ _gwtmux_pick() {
     [[ -n "$pick" ]] && paths+=("$pick")
   done <<<"$picked"
   [[ ${#paths[@]} -eq 0 ]] && return 0
-  gwtmux "${paths[@]}"
+  gwtmux ${open_flags:+"-$open_flags"} "${paths[@]}"
 }
 
 # create a git worktree from branch or pr number in new tmux window
@@ -1147,6 +1154,9 @@ USAGE:
   gwtmux -f [root]                 Pick worktree(s) with fzf and open them
   gwtmux -h, --help                Show this help message
 
+  -b, --background                 Open windows in the background (normal, -a, -f)
+  -y, --yes                        Create new branches with no prompt (normal, -a, -f)
+
 NORMAL MODE:
   gwtmux <branch>          Create worktree for branch, open in new tmux window
   gwtmux <pr_number>       Create worktree for PR's branch (uses gh cli)
@@ -1159,7 +1169,20 @@ NORMAL MODE:
   gwtmux -a                Open windows for all existing worktrees
                            (from the repo parent dir, or inside a flat repo)
 
-  If window already exists for the branch, it will be selected instead.
+  gwtmux -b <branch>       Open the window in the background: the focus stays
+                           on the current window, and gwtmux never uses the
+                           current window for the worktree
+  gwtmux -y <branch>       Create a new branch with no "Create new branch?"
+                           prompt. Use it where there is no terminal (a script,
+                           an agent's shell). Without -y and with no terminal,
+                           gwtmux does not create the branch and exits with 1.
+  gwtmux -by <branch>      Combine the two. -b and -y can be at any position,
+                           and they also apply to -a, -f and no arguments.
+
+  If window already exists for the branch, it will be selected instead. With
+  -b it is not selected, and gwtmux prints "Window '<name>' already exists".
+  When gwtmux cannot open a worktree, it continues with the other arguments and
+  exits with 1.
   Branch names with slashes are converted to underscores for directory names.
   A path argument must be the root of a worktree; a subdirectory is an error.
   A path that does not exist, in a directory that does, creates a worktree at
@@ -1270,6 +1293,42 @@ EOF
     return 0
   fi
 
+  # -b and -y are flags of the modes that open windows: <branch|pr|path>...,
+  # -a, -f, and no arguments. They can be at any position, because a branch
+  # name cannot start with "-". The mode word is the first word that is not
+  # -b or -y. When it is -d, -l, -h or --rename, the words stay as they are:
+  # -d has its own -b (delete the branch). Then a -b or -y before the mode
+  # word is an error.
+  local background=0 assume_yes=0 open_word="" mode_word="" open_flags=""
+  local -a open_args=()
+  for open_word in "$@"; do
+    case "$open_word" in
+    --background) background=1 ;;
+    --yes) assume_yes=1 ;;
+    *)
+      if [[ "$open_word" =~ ^-[by]+$ ]]; then
+        [[ "$open_word" == *b* ]] && background=1
+        [[ "$open_word" == *y* ]] && assume_yes=1
+      else
+        [[ ${#open_args[@]} -eq 0 ]] && mode_word="$open_word"
+        open_args+=("$open_word")
+      fi
+      ;;
+    esac
+  done
+  if [[ "$mode_word" == -h || "$mode_word" == --help || "$mode_word" == -l ||
+    "$mode_word" == --list || "$mode_word" == --rename || "$mode_word" =~ ^-[^-]*d ]]; then
+    if [[ "$1" != "$mode_word" ]]; then
+      echo >&2 "Error: -b and -y work only in the modes that open windows, not with $mode_word"
+      return 1
+    fi
+    background=0 assume_yes=0
+  else
+    set -- "${open_args[@]}"
+    [[ $background -eq 1 ]] && open_flags+="b"
+    [[ $assume_yes -eq 1 ]] && open_flags+="y"
+  fi
+
   # Pin tmux context to the invoking pane up front. All later tmux operations
   # target these ids so the command behaves the same whether or not the user
   # switches or rearranges windows while it runs.
@@ -1283,7 +1342,7 @@ EOF
   local mode="normal" open_all=0
   if [[ $# -eq 0 ]]; then
     # No arguments: pick from everything, not only from below cwd as -f does.
-    _gwtmux_pick "${GWTMUX_ROOT:-$HOME}"
+    _gwtmux_pick "$open_flags" "${GWTMUX_ROOT:-$HOME}"
     return
   elif [[ "$1" == "-a" ]]; then
     if [[ $# -gt 1 ]]; then
@@ -1306,12 +1365,14 @@ EOF
       echo >&2 "Error: -f takes at most one root path"
       return 1
     fi
-    _gwtmux_pick "$@"
+    _gwtmux_pick "$open_flags" "$@"
     return
   elif [[ "$1" == "--rename" ]]; then
     mode="rename"
     shift
-  elif [[ "$1" == -* ]] && [[ "$1" =~ d ]]; then
+  elif [[ "$1" =~ ^-[^-]*d ]]; then
+    # A group of short flags with d in it (-d, -dwbr, -wd). Not a long flag:
+    # --background has a d in it too.
     mode="done"
   fi
 
@@ -1962,10 +2023,12 @@ EOF
       return 1
     fi
 
-    # Capture shell window to potentially reuse or kill (before any commands run)
+    # Capture shell window to potentially reuse or kill (before any commands run).
+    # With -b the focus stays on the current window, so gwtmux must not use it
+    # for a worktree or close it.
     local current_window_id="$gwt_window"
     local can_reuse_window=0
-    _gwtmux_window_reusable && can_reuse_window=1
+    [[ $background -eq 0 ]] && _gwtmux_window_reusable && can_reuse_window=1
 
     if [[ $open_all -eq 1 ]]; then
       # Convention mode is decided first, on "$PWD/default is a repo ROOT".
@@ -1997,7 +2060,7 @@ EOF
             flat_matched=$((flat_matched + 1))
             flat_window_id="$(_gwtmux_window_id_for "$gwt_session" "$flat_wt_path" "$flat_window_name")"
             if [[ -z "$flat_window_id" ]]; then
-              _gwtmux_open_window "$gwt_session" "$flat_wt_path" "$flat_window_name"
+              _gwtmux_open_window "$gwt_session" "$flat_wt_path" "$flat_window_name" "$background"
             else
               _gwtmux_tag_pr "$flat_window_id" "$flat_wt_path"
             fi
@@ -2039,7 +2102,7 @@ EOF
             # Check if window already exists
             local noarg_window_id="$(_gwtmux_window_id_for "$gwt_session" "$worktree_path" "$window_name")"
             if [[ -z "$noarg_window_id" ]]; then
-              _gwtmux_open_window "$gwt_session" "$worktree_path" "$window_name"
+              _gwtmux_open_window "$gwt_session" "$worktree_path" "$window_name" "$background"
             else
               _gwtmux_tag_pr "$noarg_window_id" "$worktree_path"
             fi
@@ -2122,6 +2185,8 @@ EOF
 
     # Track if any worktree succeeded (for window reuse logic)
     local success_count=0
+    # Set when a worktree could not be opened: the exit status is then 1
+    local open_failed=0
 
     # Declare loop variables outside the loop to avoid re-declaration issues
     local branch window_name dir_branch worktree_path worktree_exists has_local has_remote rc repo_path_matched new_path_matched pr_branch arg_parent arg_basename resolved_parent repo_parent_candidate candidate_common_dir path_matched arg_is_path_shaped arg_worktree_root resolved_path existing_window_id
@@ -2319,7 +2384,12 @@ EOF
       existing_window_id="$(_gwtmux_window_id_for "$gwt_session" "$worktree_path" "$window_name")"
       if [[ -n "$existing_window_id" ]]; then
         [[ "$existing_window_id" == "$current_window_id" ]] && current_window_used=1
-        tmux select-window -t "$existing_window_id"
+        if [[ $background -eq 1 ]]; then
+          # Not selected: tell the caller that no new window opened.
+          echo "Window '$(tmux display-message -p -t "$existing_window_id" '#W')' already exists"
+        else
+          tmux select-window -t "$existing_window_id"
+        fi
         # A PR can start after the window opened: look again if it has no tag.
         _gwtmux_tag_pr "$existing_window_id" "$worktree_path"
         success_count=$((success_count + 1))
@@ -2340,16 +2410,26 @@ EOF
           $git_cmd -C "$git_root" worktree add --quiet -b "$branch" -- "$worktree_path" "origin/$branch" || rc=$?
         else
           local confirm=""
-          printf "Create new branch '%s'? [Y/n] " "$branch"
-          read -r confirm </dev/tty
-          if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
-            echo "Skipping '$branch'"
-            continue
+          if [[ $assume_yes -eq 0 ]]; then
+            # With no terminal (a script, an agent's shell), read fails and an
+            # empty answer is "yes". Do not create a branch that nobody agreed to.
+            if ! (: </dev/tty) 2>/dev/null; then
+              echo >&2 "Error: no terminal to ask 'Create new branch $branch?'. Use -y to create it."
+              open_failed=1
+              continue
+            fi
+            printf "Create new branch '%s'? [Y/n] " "$branch"
+            read -r confirm </dev/tty
+            if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
+              echo "Skipping '$branch'"
+              continue
+            fi
           fi
           $git_cmd -C "$git_root" worktree add --quiet --no-track -b "$branch" -- "$worktree_path" "origin/$default_branch" || rc=$?
         fi
         if [[ $rc -ne 0 ]]; then
           echo >&2 "Warning: failed to create worktree for '$branch', skipping"
+          open_failed=1
           continue
         fi
       fi
@@ -2360,7 +2440,7 @@ EOF
         reused_window_path="$worktree_path"
         current_window_used=1
       else
-        _gwtmux_open_window "$gwt_session" "$worktree_path" "$window_name"
+        _gwtmux_open_window "$gwt_session" "$worktree_path" "$window_name" "$background"
       fi
 
       success_count=$((success_count + 1))
@@ -2377,6 +2457,7 @@ EOF
     if [[ $success_count -gt 0 && $can_reuse_window -eq 1 && $current_window_used -eq 0 ]]; then
       tmux kill-window -t "$current_window_id"
     fi
+    [[ $open_failed -eq 0 ]] || return 1
     ;;
   esac
 }
